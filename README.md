@@ -1,47 +1,116 @@
-# Batteristyrning – effektavgift
+# Batterycontrol – Prediktiv och kostnadsoptimal batteristyrning
 
-**Mål:** hålla importtopparna under taket när Göteborg Energis effektavgift börjar
-räknas **mån 2/11-2026 07:00** (mätstart 1/11, som är söndag/lågpris), utan att
-förlora spot-flexibiliteten (bastu, EV-laddning på billiga timmar).
+**Batterycontrol** är ett system för prediktiv, rullande optimering (MPC – Model Predictive Control) av hembatteri mot dynamiska elpriser och effekttariffer. Systemet samverkar med **Home Assistant** och styr en **Solis hybridväxelriktare** via Modbus.
 
-**Status (2026-10-27):** analys + sim + spec klara; Lager 0 (peak-shaving 13 kW)
-verifierat — klampar importen på ~12,85 kW även under batteriladdning (TOU-vägen).
-Nästa: urladdningstest (regulatorns sista handtag), morgon-x-skript i skuggläge,
-live 2/11.
+---
 
-## Innehåll
+## 1. Systembeskrivning och funktionalitet
 
-- `GLOBAL-OPTIMERING-MODELL.md` — **Global optimeringsmodell (48h MPC)**:
-  Matematisk specifikation för LP/MILP över 192 kvartar (48 timmar), rullande omplanering
-  varje kvart. Hanterar separata energiflöden, spotpriser, verkningsgrader, slitagekostnad,
-  terminalvärde på SOC och 14 kW timmedelbegränsning, samt framtida integration av effekttariffen.
-- `SPEC-effektregulator.md` — **huvuddokumentet för heuristisk regulator**: avtalsregler, 3-lagersarkitektur,
-  x-algoritmen, aktuatorer/sensorer, verifieringsplan, GE-svar.
-- `el_2025_tim.csv` — timvis import 2025 (brutto), underlag för allt.
-- `blocks_classified.csv` / `blocks_42.csv` — EV-block (101 klassade, 2 564 kWh).
-- `daily.csv`, `hourly_flags.csv`, `dayA_pre_batt.csv`, `temp_2025_gbg.csv` —
-  dags-/timdata, flaggor, temperatur (Göteborg).
-- `fig1–5` — heatmap, månadskostnad, flatten-sim, behov-vs-temp, EV-karta.
+Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall över en rullande 48-timmars tidshorisont (192 kvartar). Det körs cykliskt var 15:e minut via cron och utför följande huvudfunktioner:
 
-## Beslut & fakta (korta)
+### 1.1 Huvudfunktioner
+- **Spotprisarbitrage:** Laddar batteriet under lågprisperioder och urladdar under dyra timmar med hänsyn tagen till batteriets slitagekostnad och verkningsgrader vid laddning/urladdning ($\eta_{\text{chg}}=0.95, \eta_{\text{dis}}=0.95$).
+- **Effekttaxeminimering (Göteborg Energi):** Optimerar automatiskt mot nätägarens effekttariff (135 kr/kW·månad baserat på medelvärdet av månadens tre högsta timtoppar på olika helgfria vardagar kl 07:00–20:00 under perioden 1 november – 31 mars).
+- **Adaptiv last- och produktionsprognos:** Bygger en 48h-prognos för hushållets elbehov och solproduktion:
+  - Solprognos via Solcast.
+  - Värmebehovsmodellering kopplad mot SMHI:s temperaturprognos och husets värmepumpskoefficienter (NIBE BT1).
+  - Dynamisk felkorrigering (EWMA) mot momentant uppmätt huslast för att snabbt fånga avvikelser.
+- **Solis-anpassad laddreglering:** I stället för on/off-pulser med maxeffekt fördelas nödvändig laddenergi jämnt över hela 15-minuterskvarten genom dynamisk beräkning och rampning av strömbörvärdet (A) baserat på batterispänning.
+- **Urladdningsspärr via `backup_soc`:** När optimeraren finner det mest lönsamt att spara lagrad energi till senare dyrare timmar (eller inför morgonens effekttaxa) spärras växelriktarens Self-Use autonomt genom att sätta `backup_soc` till aktuell SOC. När urladdning planeras sänks golvet till normal basreserv (15 %).
+- **Dynamisk reservhantering:**
+  - Fram till kl 19:00 hålls minst 1,0 kWh (ca 5 % SOC) i reserv för att parera transienta hushållstoppar (1,0 kWh under en kvart motsvarar 4 kW kontinuerlig marginal).
+  - Mellan kl 19:00 och 20:00 släpps reserven fri ner mot batteriets hårdvarugolv (0 kWh användbart).
+- **Huvudsäkringsskydd:** Strikt bivillkor i optimeraren som förhindrar att timmedeleffekten från nätet någonsin överskrider abonnemangstaket på 14 kW.
 
-- Effektavgift **135 kr/kW·mån** = medlet av 3 högsta **dygnestoppar** på 3 olika
-  dygn, **bruttoimport**, högpris = helgfria vardagar 07–20 (1 nov–31 mars).
-- 14 kW effektnivå (timmedeleffekt) hela året; >3 överträffar/12 mån → tvångsbyte
-  till 43 kW-modell. 2025 års beteende = 5 dygn >14 kW → hade gett byte i november.
-- **RC-force förbjuden som laddväg** (slåss mot peak-shaving, 18 kW-kaos 21/10).
-  Bara TOU-slotar. `time.set_value` (inte `set_time`). En skrivare per fönster
-  (pausa Predbat när man styr manuellt).
-- x-algoritmen: lös x ur Σ max(0, behov−x) = B_eff; sweet spot x 1,0–2,0;
-  adaptiv ≈ 1 000 kr/säsong.
+---
 
-## Nästa steg
+## 2. Arkitektur och logik
 
-1. **Urladdningstest** — vilket register styr urladdningen 07–20? (hypotes:
-   dynamiskt peak-shaving-tak = x gör jobbet)
-2. **Morgon-x-skript** i skuggläge (loggar beslut, inga skrivningar).
-3. **Live mån 2/11 06:55** med enkel x (månadens p90 + temperatur), kalibrera löpande.
-4. Öppen fråga GE: är 24/31 dec helgfria vardagar? (tills vidare: behandlas som
-   avgiftsskyddade — säkert val)
+Systemet är uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lager:
 
-*Uppdatera med UPDATE-rader, rewrita inte historien.*
+```
+                  [ Home Assistant REST API ]
+                   /           |           \
+     Solcast / SMHI / NIBE     |       Nordpool Spotpriser
+                 |             |             |
+                 v             v             v
+       +------------------+    |    +-------------------+
+       |   forecast.py    |    |    |   optimizer.py    |
+       | Adaptiv 48h-last |    |    | Global 48h LP     |
+       | & solprognos     |--->|--->| (SciPy HiGHS)     |
+       +------------------+    |    +-------------------+
+                               |              |
+                               | (Börvärden)  v
+                      +------------------+
+                      |   run_loop.py    |
+                      | Kvartsvis styr-  |
+                      | & säkerhetslogik |
+                      +------------------+
+                               |
+                               v
+                     [ Solis Modbus / HA ]
+             (TOU Slot 1, backup_soc, peak-shaving)
+```
+
+1. **`src/forecast.py` (Prognosmotor):** Hämtar historisk baslast, väder- och solprognos, applicerar värmekoefficienter för utetemperatur och beräknar en adaptiv bias mot aktuell förbrukning. Skickar 48h-prognosvektorer till Home Assistant.
+2. **`src/optimizer.py` (Global LP-lösare):** Formulerar ett linjärprogrammeringsproblem (LP) med 192 diskreta tidssteg (15 min per steg) och 6 variabler per kvart. Lösaren (`scipy.optimize.linprog` med HiGHS-metoden) minimerar total nettokostnad över 48 timmar under givna bivillkor (SOC-dynamik, batterigränser, effekttak, säkringsgräns och terminalvärde för batteriet). Lösningen tar ca 0,1 s.
+3. **`src/run_loop.py` (Exekveringsloop):** Anropas varje kvart via systemets scheduler (cron). Kontrollerar driftlägen (`batterycontrol_active` och `batterycontrol_dry_run`), beräknar strömbörvärden (A), sätter urladdningsspärr (`backup_soc`) och skickar styrkommandon till växelriktaren via Home Assistant.
+4. **`src/generate_plot.py` (Visualisering):** Renderar `plan_chart.png` som visar spotpriser, effektflöden och planerad batteri-SOC för de kommande 48 timmarna.
+
+---
+
+## 3. Beroenden och systembegränsningar
+
+Systemet är utformat för en specifik hård- och mjukvaruinfrastruktur:
+
+### 3.1 Hårdvaruberoende
+- **Växelriktare:** Enbart testat och verifierat mot **Solis hybridväxelriktare** (specifikt 3-fas HV-hybrid, Solis S6-EH3P15K-H).
+  - Styrningen förutsätter att växelriktaren är konfigurerad i driftläget `Self-Use + TOU + Reserve/Backup`.
+  - Laddning sker via TOU Slot 1 (`grid_time_of_use_charge_*`).
+  - Urladdningsspärr styrs via registret för Backup SOC (`number.solis_s6_eh1p_backup_soc`, register 43024).
+  - Hårt nätimporttak styrs via Solis inbyggda Grid Peak-Shaving (`number.solis_s6_eh1p_peak_max_usable_grid_power`, register 43488).
+
+### 3.2 Mjukvaruberoenden
+- **Python-miljö:** Python 3.10+ med `scipy`, `numpy`, `paramiko`, `holidays`, `requests`/`urllib`.
+- **Home Assistant:** Förutsätter en fungerande Home Assistant-instans med REST-API och följande entiteter:
+  - *Priser:* `sensor.nordpool_predbat_import`, `sensor.nordpool_predbat_export`
+  - *Sol & Väder:* Solcast-sensorer, SMHI utetemperaturprognos
+  - *Hus & Värmepump:* Huslast (`sensor.solis_s6_eh1p_house_load` eller motsvarande), NIBE utegivare BT1
+  - *Batteristatus:* `sensor.solis_s6_eh1p_battery_soc`, `sensor.solis_s6_eh1p_battery_voltage`, `sensor.solis_s6_eh1p_battery_power`
+  - *Solis Modbus-styrning:* `number.solis_s6_eh1p_backup_soc`, `number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1`, `time.solis_s6_eh1p_grid_time_of_use_charge_start_slot_1`, `time.solis_s6_eh1p_grid_time_of_use_charge_end_slot_1`, `number.solis_s6_eh1p_peak_max_usable_grid_power`
+  - *Styrflaggor:* `input_boolean.batterycontrol_active`, `input_boolean.batterycontrol_dry_run`
+
+---
+
+## 4. Utvecklings- och versionshanteringsstrategi
+
+För att kombinera stabil produktion med kontinuerlig vidareutveckling tillämpas följande gren- och versionsstrategi:
+
+1. **`main` (Produktionsgren):**
+   - Innehåller den stabila baslinje som är driftsatt och körs i skarp miljö.
+   - Endast godkända, testade och verifierade ändringar slås ihop till `main`.
+   - Releaser och baselines taggas här (`v0.1.0`, `v0.2.0`, osv.).
+2. **`maintenance` / Hotfix-grenar (`fix/...`):**
+   - Skapas vid behov utifrån aktuell produktionsrelease för snabba felrättningar i skarp drift utan att dra med pågående experiment.
+3. **Funktionsgrenar (`feature/...` eller testgrenar):**
+   - Nya funktioner (t.ex. dynamisk samoptimering av månadens 3 toppar, styrning av elbilsladdning, etc.) utvecklas och testas i separata grenar.
+   - Körs i skuggläge (`dry-run`) innan sammanslagning med `main`.
+
+---
+
+## 5. Projektstatus & Historik
+
+- **2026-10-30:**
+  - Skapat GitHub-repository (`srogerk/batterycontrol`) och taggat första officiella baseline: **`v0.1.0`**.
+  - Infört spärrfunktion för Self-Use via `backup_soc` i `run_loop.py`.
+  - Infört uppdaterade reservvillkor: 1,0 kWh reserv fram till kl 19:00 under effekttariff-dagar, därefter fri förbrukning ner mot 0 kWh.
+  - Implementerat tjänsteanrop (`call_service`) via Home Assistant API.
+- **2026-10-29:**
+  - Komplett driftsättning av 48h LP-optimerare (HiGHS) med kalenderstöd för effekttariff (`holidays.Sweden()`).
+  - Begränsat maximal laddeffekt till 10 kW (hårdvarugräns för laddning).
+  - Infört dynamisk beräkning av laddström (A) för att smeta ut laddeffekt jämnt över hela kvartar.
+- **2026-10-27:**
+  - Analys av historisk timdata 2025 och specifikation av effekttariffregler (135 kr/kW·månad).
+  - Verifierat att Solis inbyggda peak-shaving (13 kW) klampar importen på ~12,85 kW även vid samtidig TOU-laddning.
+  - Förbjudit RC-force som laddväg p.g.a. risk för okontrollerad spikurladdning.
+
