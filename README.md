@@ -16,6 +16,9 @@ Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall öv
   - Värmebehovsmodellering kopplad mot SMHI:s temperaturprognos och husets värmepumpskoefficienter (NIBE BT1).
   - Dynamisk felkorrigering (EWMA) mot momentant uppmätt huslast för att snabbt fånga avvikelser.
 - **Solis-anpassad laddreglering:** I stället för on/off-pulser med maxeffekt fördelas nödvändig laddenergi jämnt över hela 15-minuterskvarten genom dynamisk beräkning och rampning av strömbörvärdet (A) baserat på batterispänning.
+- **Mjuk nattladdning (5 kW bas + elastisk spikpremie):** Laddning från elnätet optimeras med målet att hålla en lugn och jämn effekt på ca 5 kW (upp till 4 timmar) i sammanhängande block (minst 1 timme). Modellen använder en styckvis linjär formulering där laddning upp till 5 kW sker till rått elpris, medan laddning mellan 5 och 10 kW beläggs med en tröskelpremie på 5 öre/kWh.
+  - Om prisskillnaden under natten är $\le 5\text{ öre/kWh}$ sprids laddningen automatiskt ut på 5 kW över flera sammanhängande timmar.
+  - Om natten bjuder på en extrem prisdipp ($> 5\text{ öre/kWh}$ prisskillnad) tillåts effekten automatiskt att öka upp till 10 kW för att fånga besparingen utan att spräcka kostnadstaket.
 - **Urladdningsspärr via `backup_soc`:** När optimeraren finner det mest lönsamt att spara lagrad energi till senare dyrare timmar (eller inför morgonens effekttaxa) spärras växelriktarens Self-Use autonomt genom att sätta `backup_soc` till aktuell SOC. När urladdning planeras sänks golvet till normal basreserv (15 %).
 - **Dynamisk reservhantering:**
   - Fram till kl 19:00 hålls minst 1,0 kWh (ca 5 % SOC) i reserv för att parera transienta hushållstoppar (1,0 kWh under en kvart motsvarar 4 kW kontinuerlig marginal).
