@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+forecast_state.json
+plan_chart.png
+.DS_Store
