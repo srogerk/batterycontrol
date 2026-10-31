@@ -6,7 +6,7 @@
 
 ## 1. Systembeskrivning och funktionalitet
 
-Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall över en rullande 48-timmars tidshorisont (192 kvartar). Det körs cykliskt var 15:e minut via cron och utför följande huvudfunktioner:
+Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall över en **dynamisk planeringshorisont** (upp till 36 timmar beroende på känd Nord Pool-data, anpassat till midnatt idag före kl 13:00 och midnatt imorgon efter kl 13:00 med terminalvärde). Det körs cykliskt var 15:e minut via cron och utför följande huvudfunktioner:
 
 ### 1.1 Huvudfunktioner
 - **Spotprisarbitrage:** Laddar batteriet under lågprisperioder och urladdar under dyra timmar med hänsyn tagen till batteriets slitagekostnad och verkningsgrader vid laddning/urladdning ($\eta_{\text{chg}}=0.95, \eta_{\text{dis}}=0.95$).

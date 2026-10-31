@@ -25,7 +25,7 @@ def generate_plan_chart(output_path="/workspace/projects/Batteristyrning - effek
     pv_forecast = pv_state["attributes"]["forecast_48h_kw"] if pv_state else [0.0]*len(plan)
 
     times = [datetime.datetime.fromisoformat(p["datetime"]) for p in plan]
-    p_in, p_out = opt.build_price_vector(client, times)
+    p_in, p_out, valid_times = opt.build_price_vector(client, times)
     client.close()
 
     soc_pct = [p["soc_percent"] for p in plan]

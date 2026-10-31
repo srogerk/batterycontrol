@@ -92,7 +92,14 @@ class HAPriceAndStateClient:
         self.ssh.close()
 
 def build_price_vector(client, timestamps):
-    """Bygger 192-kvartarsvektorer för importpris och exportpris (kr/kWh)."""
+    """
+    Bygger prisvektorer för kända kvartar (kr/kWh).
+    
+    Dynamisk horisont:
+    Avgränsar horisonten strikt till de kvartar som faktiskt är kända från Nord Pool
+    (fram till 23:45 idag före kl 13, och fram till 23:45 imorgon efter kl 13).
+    Påhittade/upprepade priser i framtiden undviks helt.
+    """
     import_data = client.get_state("sensor.nordpool_predbat_import")
     export_data = client.get_state("sensor.nordpool_predbat_export")
 
@@ -111,21 +118,25 @@ def build_price_vector(client, timestamps):
 
     p_in = []
     p_out = []
-    last_p_in = float(import_data.get("state", 1.5)) if import_data else 1.5
-    last_p_out = float(export_data.get("state", 1.0)) if export_data else 1.0
+    valid_timestamps = []
 
     for dt in timestamps:
-        # Konvertera dt till lokal tid (eller ISO sträng)
-        # Vi matchar mot YYYY-MM-DDTHH:MM
         key = dt.strftime("%Y-%m-%dT%H:%M")
-        val_in = lookup_import.get(key, last_p_in)
-        val_out = lookup_export.get(key, last_p_out)
-        p_in.append(val_in)
-        p_out.append(val_out)
-        last_p_in = val_in
-        last_p_out = val_out
+        if key in lookup_import:
+            valid_timestamps.append(dt)
+            p_in.append(lookup_import[key])
+            p_out.append(lookup_export.get(key, 0.0))
+        else:
+            # Så fort prisdata upphör bryter vi horisonten
+            break
 
-    return np.array(p_in), np.array(p_out)
+    # Fallback om inga priser alls hittades i raw_today
+    if not valid_timestamps:
+        default_p_in = float(import_data.get("state", 1.5)) if import_data else 1.5
+        default_p_out = float(export_data.get("state", 1.0)) if export_data else 1.0
+        return np.array([default_p_in] * len(timestamps)), np.array([default_p_out] * len(timestamps)), timestamps
+
+    return np.array(p_in), np.array(p_out), valid_timestamps
 
 def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, timestamps):
     """
@@ -415,11 +426,14 @@ def main():
     base = now.replace(minute=minute, second=0, microsecond=0)
     timestamps = [base + datetime.timedelta(minutes=15 * i) for i in range(192)]
 
-    p_in, p_out = build_price_vector(client, timestamps)
+    p_in, p_out, valid_timestamps = build_price_vector(client, timestamps)
+    T = len(valid_timestamps)
+    load_f = load_forecast[:T]
+    pv_f = pv_forecast[:T]
 
-    print(f"Startar LP-optimering: SOC={soc_pct:.1f}% ({soc_kwh:.2f} kWh), T={len(timestamps)} kvartar.")
+    print(f"Startar LP-optimering: SOC={soc_pct:.1f}% ({soc_kwh:.2f} kWh), dynamisk horisont T={T} kvartar ({T/4:.2f} h).")
     t0 = time.time()
-    plan, status = optimize_48h(soc_kwh, load_forecast, pv_forecast, p_in, p_out, timestamps)
+    plan, status = optimize_48h(soc_kwh, load_f, pv_f, p_in, p_out, valid_timestamps)
     elapsed = time.time() - t0
 
     if not plan:
