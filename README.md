@@ -16,9 +16,10 @@ Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall öv
   - Värmebehovsmodellering kopplad mot SMHI:s temperaturprognos och husets värmepumpskoefficienter (NIBE BT1).
   - Dynamisk felkorrigering (EWMA) mot momentant uppmätt huslast för att snabbt fånga avvikelser.
 - **Solis-anpassad laddreglering:** I stället för on/off-pulser med maxeffekt fördelas nödvändig laddenergi jämnt över hela 15-minuterskvarten genom dynamisk beräkning och rampning av strömbörvärdet (A) baserat på batterispänning.
-- **Mjuk nattladdning (5 kW bas + elastisk spikpremie):** Laddning från elnätet optimeras med målet att hålla en lugn och jämn effekt på ca 5 kW (upp till 4 timmar) i sammanhängande block (minst 1 timme). Modellen använder en styckvis linjär formulering där laddning upp till 5 kW sker till rått elpris, medan laddning mellan 5 och 10 kW beläggs med en tröskelpremie på 5 öre/kWh.
-  - Om prisskillnaden under natten är $\le 5\text{ öre/kWh}$ sprids laddningen automatiskt ut på 5 kW över flera sammanhängande timmar.
-  - Om natten bjuder på en extrem prisdipp ($> 5\text{ öre/kWh}$ prisskillnad) tillåts effekten automatiskt att öka upp till 10 kW för att fånga besparingen utan att spräcka kostnadstaket.
+- **Mjuk och sammanhängande laddning (~5 kW bas, dygnsagnostisk med kontinuitetshysteres):** Laddning från elnätet optimeras för att hålla en lugn och jämn effekt på ca 5 kW i breda, sammanhängande block utan 15-minuters hack eller onödiga avbrott, oavsett när på dygnet lågpriset inträffar (natt på vintern, middagssol på sommaren):
+  - **Progressiv laddeffekt (`c_extra_penalty` = 15 öre/kWh):** Laddning upp till 5,0 kW sker till ordinarie marginalkostnad, medan effekt mellan 5 och 10 kW beläggs med en tröskelpremie på 15 öre/kWh. Optimeraren väljer därmed naturligt moderat effekt över längre tid framför stötvisa maxspikar.
+  - **Kontinuitetshysteres (`c_hysteresis` = 5 öre/kWh):** Om laddning redan pågick föregående kvart ges innevarande kvart ($t=0$) en rabatt på 5 öre/kWh. Detta motverkar fladder ('chatter') och hindrar omplaneringen från att avbryta ett påbörjat laddblock för små marginella prisskillnader.
+  - **Växlingsdämpning (`c_switch` = 3 öre/kWh ändring):** En linjär straffterm på $|P_t - P_{t-1}|$ mellan på varandra följande kvartar binder samman laddningen till stabila, sammanhängande tidsfönster.
 - **Urladdningsspärr via `backup_soc`:** När optimeraren finner det mest lönsamt att spara lagrad energi till senare dyrare timmar (eller inför morgonens effekttaxa) spärras växelriktarens Self-Use autonomt genom att sätta `backup_soc` till aktuell SOC. När urladdning planeras sänks golvet till normal basreserv (15 %).
 - **Dynamisk reservhantering:**
   - Fram till kl 19:00 hålls minst 1,0 kWh (ca 5 % SOC) i reserv för att parera transienta hushållstoppar (1,0 kWh under en kvart motsvarar 4 kW kontinuerlig marginal).
@@ -56,7 +57,7 @@ Systemet är uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lager:
 ```
 
 1. **`src/forecast.py` (Prognosmotor):** Hämtar historisk baslast, väder- och solprognos, applicerar värmekoefficienter för utetemperatur och beräknar en adaptiv bias mot aktuell förbrukning. Skickar 48h-prognosvektorer till Home Assistant.
-2. **`src/optimizer.py` (Global LP-lösare):** Formulerar ett linjärprogrammeringsproblem (LP) med 192 diskreta tidssteg (15 min per steg) och 6 variabler per kvart. Lösaren (`scipy.optimize.linprog` med HiGHS-metoden) minimerar total nettokostnad över 48 timmar under givna bivillkor (SOC-dynamik, batterigränser, effekttak, säkringsgräns och terminalvärde för batteriet). Lösningen tar ca 0,1 s.
+2. **`src/optimizer.py` (Global LP-lösare):** Formulerar ett linjärprogrammeringsproblem (LP) med dynamisk horisont T kvartar (upp till 36 timmar kända Nord Pool-priser) och 10 variabler per kvart (inklusive styckvis laddeffekt och rampningsvariabler). Lösaren (`scipy.optimize.linprog` med HiGHS-metoden) minimerar total nettokostnad under givna bivillkor (SOC-dynamik, batterigränser, effekttak, säkringsgräns, kontinuitetshysteres och terminalvärde). Lösningen tar ca 0,05 s.
 3. **`src/run_loop.py` (Exekveringsloop):** Anropas varje kvart via systemets scheduler (cron). Kontrollerar driftlägen (`batterycontrol_active` och `batterycontrol_dry_run`), beräknar strömbörvärden (A), sätter urladdningsspärr (`backup_soc`) och skickar styrkommandon till växelriktaren via Home Assistant.
 4. **`src/generate_plot.py` (Visualisering):** Renderar `plan_chart.png` som visar spotpriser, effektflöden och planerad batteri-SOC för de kommande 48 timmarna.
 
@@ -103,6 +104,12 @@ För att kombinera stabil produktion med kontinuerlig vidareutveckling tillämpa
 
 ## 5. Projektstatus & Historik
 
+- **2026-10-31 (v0.2.1 / feature/smooth-charging):**
+  - Mjuk och sammanhängande laddning med dygnsagnostisk formulering (löser 15-minuters fragmentering).
+  - Utökade LP-modellen till 10 variabler per kvart med linjära rampningsvariabler ($R^+_t, R^-_t$).
+  - Justerade tröskelpremie för laddeffekt $>5\text{ kW}$ till 15 öre/kWh (`c_extra_penalty = 0.15`).
+  - Införde kontinuitetshysteres (`c_hysteresis = 0.05 kr/kWh`) baserat på föregående kvarts faktiska laddstatus (`prev_charge_kw`).
+  - Införde växlingsdämpning (`c_switch = 0.03 kr/kWh ändring`) för att binda samman laddningen i stabila tidsblock.
 - **2026-10-30:**
   - Skapat GitHub-repository (`srogerk/batterycontrol`) och taggat första officiella baseline: **`v0.1.0`**.
   - Infört spärrfunktion för Self-Use via `backup_soc` i `run_loop.py`.
