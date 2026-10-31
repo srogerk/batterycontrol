@@ -11,7 +11,7 @@ Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall öv
 ### 1.1 Huvudfunktioner
 - **Spotprisarbitrage:** Laddar batteriet under lågprisperioder och urladdar under dyra timmar med hänsyn tagen till batteriets slitagekostnad och verkningsgrader vid laddning/urladdning ($\eta_{\text{chg}}=0.95, \eta_{\text{dis}}=0.95$).
 - **Effekttaxeminimering (Göteborg Energi):** Optimerar automatiskt mot nätägarens effekttariff (135 kr/kW·månad baserat på medelvärdet av månadens tre högsta timtoppar på olika helgfria vardagar kl 07:00–20:00 under perioden 1 november – 31 mars).
-- **Adaptiv last- och produktionsprognos:** Bygger en 48h-prognos för hushållets elbehov och solproduktion:
+- **Adaptiv last- och produktionsprognos:** Bygger en rullande prognos (upp till 48h horisont) för hushållets elbehov och solproduktion:
   - Solprognos via Solcast.
   - Värmebehovsmodellering kopplad mot SMHI:s temperaturprognos och husets värmepumpskoefficienter (NIBE BT1).
   - Dynamisk felkorrigering (EWMA) mot momentant uppmätt huslast för att snabbt fånga avvikelser.
@@ -40,8 +40,8 @@ Systemet är uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lager:
                  v             v             v
        +------------------+    |    +-------------------+
        |   forecast.py    |    |    |   optimizer.py    |
-       | Adaptiv 48h-last |    |    | Global 48h LP     |
-       | & solprognos     |--->|--->| (SciPy HiGHS)     |
+       | Adaptiv last- &  |    |    | Global dynamisk   |
+       | solprognos       |--->|--->| LP (SciPy HiGHS)  |
        +------------------+    |    +-------------------+
                                |              |
                                | (Börvärden)  v
@@ -56,10 +56,10 @@ Systemet är uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lager:
              (TOU Slot 1, backup_soc, peak-shaving)
 ```
 
-1. **`src/forecast.py` (Prognosmotor):** Hämtar historisk baslast, väder- och solprognos, applicerar värmekoefficienter för utetemperatur och beräknar en adaptiv bias mot aktuell förbrukning. Skickar 48h-prognosvektorer till Home Assistant.
+1. **`src/forecast.py` (Prognosmotor):** Hämtar historisk baslast, väder- och solprognos, applicerar värmekoefficienter för utetemperatur och beräknar en adaptiv bias mot aktuell förbrukning. Skickar prognosvektorer till Home Assistant (anpassas dynamiskt av optimeraren till kända Nord Pool-timmar).
 2. **`src/optimizer.py` (Global LP-lösare):** Formulerar ett linjärprogrammeringsproblem (LP) med dynamisk horisont T kvartar (upp till 36 timmar kända Nord Pool-priser) och 10 variabler per kvart (inklusive styckvis laddeffekt och rampningsvariabler). Lösaren (`scipy.optimize.linprog` med HiGHS-metoden) minimerar total nettokostnad under givna bivillkor (SOC-dynamik, batterigränser, effekttak, säkringsgräns, kontinuitetshysteres och terminalvärde). Lösningen tar ca 0,05 s.
 3. **`src/run_loop.py` (Exekveringsloop):** Anropas varje kvart via systemets scheduler (cron). Kontrollerar driftlägen (`batterycontrol_active` och `batterycontrol_dry_run`), beräknar strömbörvärden (A), sätter urladdningsspärr (`backup_soc`) och skickar styrkommandon till växelriktaren via Home Assistant.
-4. **`src/generate_plot.py` (Visualisering):** Renderar `plan_chart.png` som visar spotpriser, effektflöden och planerad batteri-SOC för de kommande 48 timmarna.
+4. **`src/generate_plot.py` (Visualisering):** Renderar `plan_chart.png` som visar spotpriser, effektflöden och planerad batteri-SOC för den dynamiska planeringshorisonten (11–36 timmar).
 
 ---
 
@@ -116,7 +116,7 @@ För att kombinera stabil produktion med kontinuerlig vidareutveckling tillämpa
   - Infört uppdaterade reservvillkor: 1,0 kWh reserv fram till kl 19:00 under effekttariff-dagar, därefter fri förbrukning ner mot 0 kWh.
   - Implementerat tjänsteanrop (`call_service`) via Home Assistant API.
 - **2026-10-29:**
-  - Komplett driftsättning av 48h LP-optimerare (HiGHS) med kalenderstöd för effekttariff (`holidays.Sweden()`).
+  - Komplett driftsättning av LP-optimerare (HiGHS) med kalenderstöd för effekttariff (`holidays.Sweden()`).
   - Begränsat maximal laddeffekt till 10 kW (hårdvarugräns för laddning).
   - Infört dynamisk beräkning av laddström (A) för att smeta ut laddeffekt jämnt över hela kvartar.
 - **2026-10-27:**
