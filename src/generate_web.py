@@ -50,11 +50,11 @@ def fetch_and_compute():
 
     # Ekonomiska och tekniska beräkningar över planeringshorisonten
     cost_with_battery = 0.0
-    battery_wear_cost = 0.0
     total_charge_kwh = 0.0
     total_discharge_kwh = 0.0
     cost_without_battery = 0.0
     max_planned_grid_kw = 0.0
+    max_grid_time_str = ""
 
     quarter_data = []
 
@@ -66,8 +66,13 @@ def fetch_and_compute():
         load_kw = load_forecast[i] if i < len(load_forecast) else 0.0
         pv_kw = pv_forecast[i] if i < len(pv_forecast) else 0.0
 
+        dt_utc = times[i]
+        dt_local = dt_utc.astimezone(TZ_STOCKHOLM)
+        t_str = dt_local.strftime("%a %H:%M")
+
         if imp_kw > max_planned_grid_kw:
             max_planned_grid_kw = imp_kw
+            max_grid_time_str = t_str
 
         e_imp = imp_kw * 0.25
         e_exp = exp_kw * 0.25
@@ -77,7 +82,6 @@ def fetch_and_compute():
         dis_kwh = dis_kw * 0.25
         total_charge_kwh += chg_kwh
         total_discharge_kwh += dis_kwh
-        battery_wear_cost += (chg_kwh + dis_kwh) * 0.15
 
         # Baseline utan batteri (direktanvändning av PV till last, resten nätimport)
         net_l = (load_kw - pv_kw) * 0.25
@@ -86,12 +90,9 @@ def fetch_and_compute():
         else:
             cost_without_battery -= float((-net_l) * p_out[i])
 
-        dt_utc = times[i]
-        dt_local = dt_utc.astimezone(TZ_STOCKHOLM)
-
         quarter_data.append({
             "time": p["datetime"],
-            "time_str": dt_local.strftime("%a %H:%M"),
+            "time_str": t_str,
             "hour": dt_local.hour,
             "minute": dt_local.minute,
             "day_name": dt_local.strftime("%A"),
@@ -108,13 +109,18 @@ def fetch_and_compute():
             "pv_kw": round(float(pv_kw), 2)
         })
 
+    # Slitagekostnad: 15 öre/kWh per genomströmmad energicykel (baseras på urladdad energi)
+    # Alternativt 15 öre ladd + 15 öre urladd = 30 öre fullcykel, men per Roger är det 15 öre/kWh
+    battery_wear_cost = float(total_discharge_kwh * 0.15)
+
     # Terminalvärdesjustering för batteriets differens
     soc_start = float(plan[0]["soc_kwh"])
     soc_end = float(plan[-1]["soc_kwh"])
     v_term = float(np.mean(p_in))
     term_diff = (soc_end - soc_start) * v_term
 
-    net_spot_savings = cost_without_battery - (cost_with_battery + battery_wear_cost) + term_diff
+    gross_profit = cost_without_battery - cost_with_battery + term_diff
+    net_profit = gross_profit - battery_wear_cost
 
     # Effekttariff / effektavgift nyckelvärden
     now_local = datetime.datetime.now(TZ_STOCKHOLM)
@@ -152,7 +158,8 @@ def fetch_and_compute():
             "current_spot_in": round(float(p_in[0]), 2)
         },
         "metrics": {
-            "net_spot_savings_kr": round(net_spot_savings, 2),
+            "gross_profit_kr": round(gross_profit, 2),
+            "net_profit_kr": round(net_profit, 2),
             "cost_with_battery_kr": round(cost_with_battery, 2),
             "cost_without_battery_kr": round(cost_without_battery, 2),
             "battery_wear_cost_kr": round(battery_wear_cost, 2),
@@ -160,6 +167,7 @@ def fetch_and_compute():
             "total_charge_kwh": round(total_charge_kwh, 1),
             "total_discharge_kwh": round(total_discharge_kwh, 1),
             "max_planned_grid_kw": round(max_planned_grid_kw, 2),
+            "max_grid_time_str": max_grid_time_str,
             "target_07_soc": target_07_soc,
             "tariff_active_season": tariff_month
         },
@@ -350,7 +358,7 @@ def build_html(data):
   <!-- KPI Grid -->
   <div class="kpi-grid">
     <div class="kpi-card">
-      <div class="kpi-title">Estimerad Nettovinst</div>
+      <div class="kpi-title">Estimerad Bruttovinst</div>
       <div class="kpi-value kpi-val-green" id="kpi-profit">+0.00 kr</div>
       <div class="kpi-sub" id="kpi-profit-sub">Arbitrage vs direktförbrukning</div>
     </div>
@@ -362,17 +370,17 @@ def build_html(data):
     <div class="kpi-card">
       <div class="kpi-title">Börvärde Just Nu</div>
       <div class="kpi-value" id="kpi-next-flow">0.0 kW</div>
-      <div class="kpi-sub" id="kpi-spot-now">Spotpris: -- kr/kWh</div>
+      <div class="kpi-sub" id="kpi-spot-now">Inköpspris nu: -- kr/kWh</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-title">Planerad Nätimport Max</div>
       <div class="kpi-value kpi-val-warn" id="kpi-max-grid">0.0 kW</div>
-      <div class="kpi-sub">Säkringstak: 14.0 kW (20A)</div>
+      <div class="kpi-sub" id="kpi-max-grid-sub">Tidpunkt: --</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-title">Total Omsättning Plan</div>
       <div class="kpi-value" id="kpi-throughput">0.0 kWh</div>
-      <div class="kpi-sub" id="kpi-wear">Slitage: 0.00 kr (30 öre/kWh)</div>
+      <div class="kpi-sub" id="kpi-wear">Nettovinst: +0.00 kr | Slitage: 0.00 kr</div>
     </div>
   </div>
 
@@ -396,11 +404,11 @@ def build_html(data):
     </div>
   </div>
 
-  <!-- Graf 2: Batteri SOC & Spotpris -->
+  <!-- Graf 3: Batteri SOC & Inköpspris -->
   <div class="chart-section">
     <div class="chart-header">
-      <div class="chart-title">Batteri State of Charge (SOC %) vs Spotpris (kr/kWh)</div>
-      <div style="font-size: 0.8rem; color: var(--text-muted);">Importpris och laddcykler</div>
+      <div class="chart-title">Batteri State of Charge (SOC %) vs Inköpspris (kr/kWh)</div>
+      <div style="font-size: 0.8rem; color: var(--text-muted);">Inköpspris och laddcykler</div>
     </div>
     <div class="chart-wrapper">
       <canvas id="socPriceChart"></canvas>
@@ -418,7 +426,7 @@ def build_html(data):
           <th>Effekt (kW)</th>
           <th>Nätimport (kW)</th>
           <th>SOC (%)</th>
-          <th>Spotpris In (kr)</th>
+          <th>Inköpspris (kr/kWh)</th>
         </tr>
       </thead>
       <tbody id="actions-table-body">
@@ -683,7 +691,7 @@ def build_html(data):
             ...noPointConfig
           }},
           {{
-            label: 'Spotpris Import (kr/kWh)',
+            label: 'Inköpspris (kr/kWh)',
             data: priceIn,
             borderColor: '#ef4444',
             borderWidth: 1.8,

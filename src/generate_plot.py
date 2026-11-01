@@ -37,11 +37,11 @@ def generate_plan_chart(output_path="/workspace/projects/Batteristyrning - effek
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 10), sharex=True, gridspec_kw={'height_ratios': [1.2, 1.8, 1.2]})
 
-    # --- Subplot 1: Spotpris ---
-    ax1.plot(times, p_in, label="Spotpris Import (kr/kWh)", color="#d9534f", linewidth=1.8)
-    ax1.plot(times, p_out, label="Spotpris Export (kr/kWh)", color="#f0ad4e", linestyle="--", linewidth=1.2)
+    # --- Subplot 1: Inköps- och Exportpris ---
+    ax1.plot(times, p_in, label="Inköpspris (kr/kWh)", color="#d9534f", linewidth=1.8)
+    ax1.plot(times, p_out, label="Exportpris (kr/kWh)", color="#f0ad4e", linestyle="--", linewidth=1.2)
     ax1.set_ylabel("kr / kWh", fontsize=11, fontweight='bold')
-    ax1.set_title("Optimerad Batteri- och Effektplan (48h Rullande Horisont)", fontsize=14, fontweight='bold', pad=12)
+    ax1.set_title("Optimerad Batteri- och Effektplan (Rullande Horisont)", fontsize=14, fontweight='bold', pad=12)
     ax1.grid(True, linestyle=":", alpha=0.6)
     ax1.legend(loc="upper left", framealpha=0.9)
 
