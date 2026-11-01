@@ -113,13 +113,15 @@ def fetch_and_compute():
     # Alternativt 15 öre ladd + 15 öre urladd = 30 öre fullcykel, men per Roger är det 15 öre/kWh
     battery_wear_cost = float(total_discharge_kwh * 0.15)
 
-    # Terminalvärdesjustering för batteriets differens
+    # Bruttovinst = besparing direkt mot baseline utan batteri
+    gross_profit = cost_without_battery - cost_with_battery
+
+    # Terminalvärdesjustering för batteriets differens (för referens)
     soc_start = float(plan[0]["soc_kwh"])
     soc_end = float(plan[-1]["soc_kwh"])
     v_term = float(np.mean(p_in))
     term_diff = (soc_end - soc_start) * v_term
 
-    gross_profit = cost_without_battery - cost_with_battery + term_diff
     net_profit = gross_profit - battery_wear_cost
 
     # Effekttariff / effektavgift nyckelvärden
@@ -378,8 +380,8 @@ def build_html(data):
       <div class="kpi-sub" id="kpi-max-grid-sub">Tidpunkt: --</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-title">Total Omsättning Plan</div>
-      <div class="kpi-value" id="kpi-throughput">0.0 kWh</div>
+      <div class="kpi-title">OMSÄTTNING BAT In/Ut</div>
+      <div class="kpi-value" id="kpi-throughput">0,0 / 0,0 kWh</div>
       <div class="kpi-sub" id="kpi-wear">Nettovinst: +0.00 kr | Slitage: 0.00 kr</div>
     </div>
   </div>
@@ -471,8 +473,8 @@ def build_html(data):
 
     document.getElementById("kpi-max-grid").innerText = D.metrics.max_planned_grid_kw.toFixed(2) + " kW";
     document.getElementById("kpi-max-grid-sub").innerText = "Tidpunkt: " + D.metrics.max_grid_time_str;
-    document.getElementById("kpi-throughput").innerText = "Ladd " + D.metrics.total_charge_kwh.toFixed(1) + " / Ur " + D.metrics.total_discharge_kwh.toFixed(1) + " kWh";
-    document.getElementById("kpi-wear").innerText = "Nettovinst: " + (D.metrics.net_profit_kr >= 0 ? "+" : "") + D.metrics.net_profit_kr.toFixed(2) + " kr | Slitage: " + D.metrics.battery_wear_cost_kr.toFixed(2) + " kr";
+    document.getElementById("kpi-throughput").innerText = D.metrics.total_charge_kwh.toFixed(1).replace(".", ",") + " / " + D.metrics.total_discharge_kwh.toFixed(1).replace(".", ",") + " kWh";
+    document.getElementById("kpi-wear").innerText = "Kostnad: " + D.metrics.battery_wear_cost_kr.toFixed(2).replace(".", ",") + " kr | Nettovinst: " + (D.metrics.net_profit_kr >= 0 ? "+" : "") + D.metrics.net_profit_kr.toFixed(2).replace(".", ",") + " kr";
 
     // Förbered data för grafer
     const quarters = D.quarters;
@@ -720,8 +722,14 @@ def build_html(data):
           y_price: {{
             type: 'linear',
             position: 'right',
+            min: 0,
             grid: {{ drawOnChartArea: false }},
-            ticks: {{ color: '#ef4444' }},
+            ticks: {{
+              color: '#ef4444',
+              callback: function(val) {{
+                return Number(val).toFixed(2).replace('.', ',') + ' kr';
+              }}
+            }},
             title: {{ display: true, text: 'kr / kWh', color: '#ef4444' }}
           }}
         }},
