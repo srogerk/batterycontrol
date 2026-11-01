@@ -454,8 +454,8 @@ def build_html(data):
       badge.className = "badge badge-off";
     }}
 
-    document.getElementById("kpi-profit").innerText = (D.metrics.net_spot_savings_kr >= 0 ? "+" : "") + D.metrics.net_spot_savings_kr.toFixed(2) + " kr";
-    document.getElementById("kpi-profit-sub").innerText = "Utan batteri: " + D.metrics.cost_without_battery_kr.toFixed(1) + " kr | Med: " + D.metrics.cost_with_battery_kr.toFixed(1) + " kr";
+    document.getElementById("kpi-profit").innerText = (D.metrics.gross_profit_kr >= 0 ? "+" : "") + D.metrics.gross_profit_kr.toFixed(2) + " kr";
+    document.getElementById("kpi-profit-sub").innerText = "Utan batteri: " + D.metrics.cost_without_battery_kr.toFixed(2) + " kr | Med: " + D.metrics.cost_with_battery_kr.toFixed(2) + " kr";
 
     document.getElementById("kpi-soc").innerText = D.current.soc_percent.toFixed(1) + " %";
     document.getElementById("kpi-soc-sub").innerText = "Mål 07:00: " + (D.metrics.target_07_soc ? D.metrics.target_07_soc.toFixed(0) + "%" : "Ej aktiv") + " | Spärr: " + D.current.backup_soc + "%";
@@ -467,11 +467,12 @@ def build_html(data):
     }} else {{
       document.getElementById("kpi-next-flow").innerText = "0.0 kW (Väntar)";
     }}
-    document.getElementById("kpi-spot-now").innerText = "Spotpris nu: " + D.current.current_spot_in.toFixed(2) + " kr/kWh";
+    document.getElementById("kpi-spot-now").innerText = "Inköpspris nu: " + D.current.current_spot_in.toFixed(2) + " kr/kWh";
 
     document.getElementById("kpi-max-grid").innerText = D.metrics.max_planned_grid_kw.toFixed(2) + " kW";
+    document.getElementById("kpi-max-grid-sub").innerText = "Tidpunkt: " + D.metrics.max_grid_time_str;
     document.getElementById("kpi-throughput").innerText = "Ladd " + D.metrics.total_charge_kwh.toFixed(1) + " / Ur " + D.metrics.total_discharge_kwh.toFixed(1) + " kWh";
-    document.getElementById("kpi-wear").innerText = "Slitagekostnad: " + D.metrics.battery_wear_cost_kr.toFixed(2) + " kr";
+    document.getElementById("kpi-wear").innerText = "Nettovinst: " + (D.metrics.net_profit_kr >= 0 ? "+" : "") + D.metrics.net_profit_kr.toFixed(2) + " kr | Slitage: " + D.metrics.battery_wear_cost_kr.toFixed(2) + " kr";
 
     // Förbered data för grafer
     const quarters = D.quarters;
