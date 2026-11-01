@@ -155,22 +155,41 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
     8: R_chg_pos          (kWh, ökning i laddeffekt från föregående kvart)
     9: R_chg_neg          (kWh, minskning i laddeffekt från föregående kvart)
 
-    Mjuk laddoptimering och dygnsagnostisk kontinuitet:
-    - c_extra_penalty = 0.15 kr/kWh (15 öre): Föredrar moderat laddeffekt (~5 kW) över fler kvartar
-      framför korta stötvisa 10 kW-spikar. Tillåter endast 10 kW vid mycket djupa prisdippar.
-    - c_hysteresis = 0.05 kr/kWh (5 öre): Kontinuitetsstöd för innevarande kvart (t=0) om laddning
-      redan pågick föregående kvart (prev_charge_kw > 0.05 kW). Motverkar fladder och korta avbrott.
-    - c_switch = 0.03 kr/(kWh ändring): Dämpar växlingar |P_t - P_{t-1}| mellan intilliggande kvartar
-      för att hålla ihop laddfönster till sammanhängande block.
+    Effekttariff-optimering med dynamiskt effekttak (P_dag):
+    - För varje helgfri vardag nov-mar (07:00 - 20:00) skapas en kontinuerlig variabel P_dag_kw.
+    - Nätimport per kvart under 07-20 begränsas av P_dag:
+        (E_grid_load + E_grid_batt_base + E_grid_batt_extra) / 0.25 <= P_dag_kw
+    - P_dag beläggs med en kostnad på 45 kr/kW (motsvarande 135 kr/kW / 3 månadstoppar).
+    - Under P_dag råder fritt spotpris, vilket låter optimeraren arbeta naturligt.
+    - Mål: Batteriet laddas fullt till billigaste nattpris före kl 07:00, och under 07-20
+      smetas nödvändig nätimport ut helt platt så att effektavgiften minimeras.
 
-    Skalor per kvart: Energi (kWh) = Effekt (kW) * 0.25 h
+    Mjuk laddoptimering och dygnsagnostisk kontinuitet:
+    - c_extra_penalty = 0.15 kr/kWh (15 öre): Föredrar moderat laddeffekt (~5 kW) över fler kvartar.
+    - c_hysteresis = 0.05 kr/kWh (5 öre): Kontinuitetsstöd för innevarande kvart (t=0) om laddning pågick.
+    - c_switch = 0.03 kr/(kWh ändring): Dämpar växlingar mellan intilliggande kvartar.
     """
     T = len(timestamps)
     E_load = np.array(load_forecast_kw) * 0.25
     E_pv = np.array(pv_forecast_kw) * 0.25
 
+    # Identifiera alla unika effekttariff-dagar i planeringshorisonten
+    tariff_days = {} # datum -> lista med kvartsindex t under 07:00-20:00
+    for t, dt in enumerate(timestamps):
+        if is_effekttariff_day(dt):
+            if 7 <= dt.hour < 20:
+                d = dt.date()
+                if d not in tariff_days:
+                    tariff_days[d] = []
+                tariff_days[d].append(t)
+
+    tariff_day_list = sorted(list(tariff_days.keys()))
+    tariff_day_to_idx = {d: i for i, d in enumerate(tariff_day_list)}
+    num_tariff_days = len(tariff_day_list)
+
     num_vars_per_t = 10
-    total_vars = T * num_vars_per_t
+    base_vars = T * num_vars_per_t
+    total_vars = base_vars + num_tariff_days # Varje tariffdag får en egen P_dag_kw variabel
 
     # Parametrar
     eta_chg = 0.95
@@ -205,8 +224,7 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
         c[idx + 8] = c_switch
         c[idx + 9] = c_switch
 
-    # Terminalvärdering av SOC(T):
-    # SOC(T) = soc_now + sum_t [ eta_chg*(grid_batt_base + grid_batt_extra + pv_batt) - (1/eta_dis)*(batt_load + batt_grid) ]
+    # Terminalvärdering av SOC(T)
     for t in range(T):
         idx = t * num_vars_per_t
         c[idx + 1] -= v_term * eta_chg            # grid->batt_base
@@ -215,40 +233,44 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
         c[idx + 3] += v_term * (1.0 / eta_dis)    # batt->load
         c[idx + 4] += v_term * (1.0 / eta_dis)    # batt->grid
 
+    # Tariff-kostnad för månadstopp P_dag (45 kr/kW per toppdag)
+    for day_idx in range(num_tariff_days):
+        c[base_vars + day_idx] = 45.0
+
     # Bivillkor för likheter (A_eq * x = b_eq):
     A_eq = []
     b_eq = []
 
-    # 1. Huslast: grid_load + batt_load + pv_load = E_load[t] (T st)
+    # 1. Huslast: grid_load + batt_load + pv_load = E_load[t]
     for t in range(T):
         idx = t * num_vars_per_t
         row_load = np.zeros(total_vars)
-        row_load[idx + 0] = 1.0  # grid_load
-        row_load[idx + 3] = 1.0  # batt_load
-        row_load[idx + 5] = 1.0  # pv_load
+        row_load[idx + 0] = 1.0
+        row_load[idx + 3] = 1.0
+        row_load[idx + 5] = 1.0
         A_eq.append(row_load)
         b_eq.append(E_load[t])
 
-    # 2. Växlingsrelation: P_chg(t) - P_chg(t-1) - R_pos + R_neg = 0
-    # P_chg(t) = grid_batt_base + grid_batt_extra + pv_batt
+    # 2. Kontinuitet & mjuk laddrampning:
     for t in range(T):
         idx = t * num_vars_per_t
-        row_sw = np.zeros(total_vars)
-        row_sw[idx + 1] = 1.0  # base
-        row_sw[idx + 2] = 1.0  # extra
-        row_sw[idx + 6] = 1.0  # pv_batt
-        row_sw[idx + 8] = -1.0 # - R_pos
-        row_sw[idx + 9] = 1.0  # + R_neg
-
+        row_ramp = np.zeros(total_vars)
+        row_ramp[idx + 1] = 1.0
+        row_ramp[idx + 2] = 1.0
         if t == 0:
-            b_eq.append(prev_charge_kw * 0.25)
+            p_prev_quarter = (prev_charge_kw * 0.25) if was_charging else 0.0
+            row_ramp[idx + 8] = -1.0
+            row_ramp[idx + 9] = 1.0
+            A_eq.append(row_ramp)
+            b_eq.append(p_prev_quarter)
         else:
             prev_idx = (t - 1) * num_vars_per_t
-            row_sw[prev_idx + 1] = -1.0
-            row_sw[prev_idx + 2] = -1.0
-            row_sw[prev_idx + 6] = -1.0
+            row_ramp[prev_idx + 1] = -1.0
+            row_ramp[prev_idx + 2] = -1.0
+            row_ramp[idx + 8] = -1.0
+            row_ramp[idx + 9] = 1.0
+            A_eq.append(row_ramp)
             b_eq.append(0.0)
-        A_eq.append(row_sw)
 
     # Bivillkor för olikheter (A_ub * x <= b_ub):
     A_ub = []
@@ -265,9 +287,6 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
         b_ub.append(E_pv[t])
 
     # 2. Max laddeffekter:
-    # - Basladdning grid: grid_batt_base <= 1.25 kWh (5.0 kW)
-    # - Extraladdning grid: grid_batt_extra <= 1.25 kWh (5.0 kW)
-    # - Total laddning (inkl sol): grid_batt_base + grid_batt_extra + pv_batt <= 2.5 kWh (10.0 kW)
     P_base_chg_quarter = 5.0 * 0.25   # 1.25 kWh / kvart
     P_extra_chg_quarter = 5.0 * 0.25  # 1.25 kWh / kvart
     P_max_chg_quarter = 10.0 * 0.25   # 2.50 kWh / kvart
@@ -302,76 +321,45 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
         A_ub.append(row_dis)
         b_ub.append(P_max_dis_quarter)
 
-    # 3. SOC gränser: 0.0 <= SOC(k) <= 20.0 kWh för alla k = 1..T
+    # 3. Batteriets energibalans & SOC-gränser:
     for k in range(1, T + 1):
         row_soc_upper = np.zeros(total_vars)
         row_soc_lower = np.zeros(total_vars)
 
         for t in range(k):
             idx = t * num_vars_per_t
-            # upper
+            # Laddning ökar SOC
             row_soc_upper[idx + 1] += eta_chg
             row_soc_upper[idx + 2] += eta_chg
             row_soc_upper[idx + 6] += eta_chg
+            # Urladdning minskar SOC
             row_soc_upper[idx + 3] -= (1.0 / eta_dis)
             row_soc_upper[idx + 4] -= (1.0 / eta_dis)
 
-            # lower
+            # Nedre gräns
             row_soc_lower[idx + 1] -= eta_chg
             row_soc_lower[idx + 2] -= eta_chg
             row_soc_lower[idx + 6] -= eta_chg
             row_soc_lower[idx + 3] += (1.0 / eta_dis)
             row_soc_lower[idx + 4] += (1.0 / eta_dis)
 
+        # SOC(k) <= 20.0 kWh
         A_ub.append(row_soc_upper)
         b_ub.append(20.0 - soc_now_kwh)
 
+        # SOC(k) >= 0.0 kWh
         A_ub.append(row_soc_lower)
         b_ub.append(soc_now_kwh - 0.0)
 
-        # Reservkrav under effekttariff-fönstret (07:00 - 20:00 helgfria vardagar nov-mar):
+        # Reservkrav under effekttariff-fönstret (07:00 - 19:00 helgfria vardagar nov-mar):
+        # Målet fram till 19:00 är 1.0 kWh i reserv för oförutsedda spikar.
+        # Mellan 19:00 och 20:00 får reserven förbrukas fritt mot BMS-golvet.
         dt_k = timestamps[k - 1]
-        if is_effekttariff_day(dt_k):
-            # Kl 07:00: Mål SOC >= 19.5 kWh
-            if dt_k.hour == 7 and dt_k.minute == 0:
-                row_target_07 = np.zeros(total_vars)
-                for t in range(k):
-                    idx = t * num_vars_per_t
-                    row_target_07[idx + 1] -= eta_chg
-                    row_target_07[idx + 2] -= eta_chg
-                    row_target_07[idx + 6] -= eta_chg
-                    row_target_07[idx + 3] += (1.0 / eta_dis)
-                    row_target_07[idx + 4] += (1.0 / eta_dis)
-                A_ub.append(row_target_07)
-                b_ub.append(soc_now_kwh - 19.5)
+        if is_effekttariff_day(dt_k) and 7 <= dt_k.hour < 19:
+            A_ub.append(row_soc_lower)
+            b_ub.append(soc_now_kwh - 1.0)
 
-            # Mellan 07:15 och 19:00: SOC(k) >= 1.0 kWh
-            elif (dt_k.hour > 7 or (dt_k.hour == 7 and dt_k.minute > 0)) and dt_k.hour < 19:
-                row_reserve = np.zeros(total_vars)
-                for t in range(k):
-                    idx = t * num_vars_per_t
-                    row_reserve[idx + 1] -= eta_chg
-                    row_reserve[idx + 2] -= eta_chg
-                    row_reserve[idx + 6] -= eta_chg
-                    row_reserve[idx + 3] += (1.0 / eta_dis)
-                    row_reserve[idx + 4] += (1.0 / eta_dis)
-                A_ub.append(row_reserve)
-                b_ub.append(soc_now_kwh - 1.0)
-
-            # Kl 19:00 exakt: SOC >= 1.0 kWh
-            elif dt_k.hour == 19 and dt_k.minute == 0:
-                row_reserve = np.zeros(total_vars)
-                for t in range(k):
-                    idx = t * num_vars_per_t
-                    row_reserve[idx + 1] -= eta_chg
-                    row_reserve[idx + 2] -= eta_chg
-                    row_reserve[idx + 6] -= eta_chg
-                    row_reserve[idx + 3] += (1.0 / eta_dis)
-                    row_reserve[idx + 4] += (1.0 / eta_dis)
-                A_ub.append(row_reserve)
-                b_ub.append(soc_now_kwh - 1.0)
-
-    # 4. Hårt nättak (14 kW = 3.5 kWh per kvart)
+    # 4. Hård nätgräns: Max 14 kW import per kvart
     for t in range(T):
         idx = t * num_vars_per_t
         row_grid = np.zeros(total_vars)
@@ -380,6 +368,22 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
         row_grid[idx + 2] = 1.0  # grid_batt_extra
         A_ub.append(row_grid)
         b_ub.append(14.0 * 0.25)
+
+    # 5. Effekttak P_dag under effekttariff (07:00 - 20:00):
+    # Nätimport (kW) <= P_dag_kw
+    # => E_grid_import(t) - 0.25 * P_dag_kw <= 0
+    for d, indices in tariff_days.items():
+        day_idx = tariff_day_to_idx[d]
+        p_dag_var_idx = base_vars + day_idx
+        for t in indices:
+            idx = t * num_vars_per_t
+            row_pdag = np.zeros(total_vars)
+            row_pdag[idx + 0] = 1.0
+            row_pdag[idx + 1] = 1.0
+            row_pdag[idx + 2] = 1.0
+            row_pdag[p_dag_var_idx] = -0.25
+            A_ub.append(row_pdag)
+            b_ub.append(0.0)
 
     # Gränser: alla variabler >= 0
     bounds = [(0, None) for _ in range(total_vars)]
@@ -401,6 +405,11 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
     sol = res.x
     plan = []
     curr_soc = soc_now_kwh
+
+    # Extrahera P_dag per tariffdag
+    optimal_p_dag = {}
+    for day_idx, d in enumerate(tariff_day_list):
+        optimal_p_dag[d.isoformat()] = round(float(sol[base_vars + day_idx]), 2)
 
     for t in range(T):
         idx = t * num_vars_per_t
@@ -432,7 +441,7 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
             "grid_export_kw": round(grid_export_kw, 2)
         })
 
-    return plan, "Optimal"
+    return plan, "Optimal", optimal_p_dag
 
 def main():
     client = HAPriceAndStateClient()
@@ -471,7 +480,7 @@ def main():
     if plan_now_state and "next_charge_kw" in plan_now_state.get("attributes", {}):
         prev_charge_kw = float(plan_now_state["attributes"].get("next_charge_kw", 0.0))
 
-    plan, status = optimize_48h(soc_kwh, load_f, pv_f, p_in, p_out, valid_timestamps, prev_charge_kw=prev_charge_kw)
+    plan, status, optimal_p_dag = optimize_48h(soc_kwh, load_f, pv_f, p_in, p_out, valid_timestamps, prev_charge_kw=prev_charge_kw)
     elapsed = time.time() - t0
 
     if not plan:
@@ -500,6 +509,7 @@ def main():
             "next_discharge_kw": plan[0]["discharge_kw"],
             "target_soc_percent": plan[0]["soc_percent"],
             "solve_time_seconds": round(elapsed, 3),
+            "optimal_p_dag": optimal_p_dag,
             "plan_48h": plan
         }
     )

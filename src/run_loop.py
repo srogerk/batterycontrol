@@ -22,6 +22,8 @@ import datetime
 sys.path.append("/workspace/projects/Batteristyrning - effektavgift")
 import src.forecast as forecast_module
 import src.optimizer as optimizer_module
+import src.generate_plot as plot_module
+import src.generate_web as web_module
 
 LOG_FILE = "/workspace/projects/Batteristyrning - effektavgift/src/batterycontrol.log"
 
@@ -126,8 +128,49 @@ def main():
         if int(current_backup_soc) != target_backup_soc:
             log(f"[LIVE MODBUS] Ändrar number.solis_s6_eh1p_backup_soc: {current_backup_soc}% -> {target_backup_soc}%")
             client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_backup_soc", "value": target_backup_soc})
-        # Här hanteras även TOU-laddning/urladdning när skarp styrning är aktiverad
-        log(f"[LIVE MODBUS] Tillämpar: TOU Slot 1 Ström={target_charge_amps} A ({next_charge_kw:.2f} kW), Urladda={next_discharge_kw:.2f} kW, Backup SOC={target_backup_soc}%")
+
+        # TOU Slot 1 Nätladdning:
+        # Om optimeraren vill ladda från nätet i kommande kvart:
+        # Hitta hur länge laddblocket pågår i planen (sammanhängande kvartar med laddning)
+        plan_48h = plan_attrs.get("plan_48h", [])
+        if next_charge_kw > 0.05:
+            # Beräkna blockets sluttid
+            import zoneinfo
+            sthlm_tz = zoneinfo.ZoneInfo("Europe/Stockholm")
+            now_dt = datetime.datetime.now(sthlm_tz)
+            
+            # Starttid sätts till jämn kvart bakåt för säker överlappning
+            start_minute = (now_dt.minute // 15) * 15
+            start_str = f"{now_dt.hour:02d}:{start_minute:02d}:00"
+            
+            # Hitta hur många sammanhängande kvartar laddningen varar från och med kvart 0
+            charge_consecutive_quarters = 0
+            for p in plan_48h:
+                if p.get("charge_kw", 0.0) > 0.05:
+                    charge_consecutive_quarters += 1
+                else:
+                    break
+            if charge_consecutive_quarters == 0:
+                charge_consecutive_quarters = 1
+                
+            end_dt = now_dt.replace(minute=start_minute, second=0, microsecond=0) + datetime.timedelta(minutes=15 * charge_consecutive_quarters)
+            end_str = f"{end_dt.hour:02d}:{end_dt.minute:02d}:00"
+
+            log(f"[LIVE MODBUS] Aktiverar TOU Slot 1 laddning: {start_str} -> {end_str}, Ström={target_charge_amps} A ({next_charge_kw:.2f} kW), Cut-off SOC=100%")
+            client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_grid_time_of_use_charge_cut_off_soc_slot_1", "value": 100})
+            client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1", "value": target_charge_amps})
+            client.call_service("time", "set_value", {"entity_id": "time.solis_s6_eh1p_grid_time_of_use_charge_start_slot_1", "time": start_str})
+            client.call_service("time", "set_value", {"entity_id": "time.solis_s6_eh1p_grid_time_of_use_charge_end_slot_1", "time": end_str})
+            client.call_service("switch", "turn_on", {"entity_id": "switch.grid_time_of_use_charging_period_1"})
+        else:
+            # Ingen nätladdning planerad nu: stäng av TOU Slot 1 brytare och nolla ström
+            slot1_sw = client.get_state("switch.grid_time_of_use_charging_period_1")
+            if slot1_sw and slot1_sw.get("state") == "on":
+                log("[LIVE MODBUS] Ingen nätladdning nu: stänger switch.grid_time_of_use_charging_period_1")
+                client.call_service("switch", "turn_off", {"entity_id": "switch.grid_time_of_use_charging_period_1"})
+            client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1", "value": 0.0})
+
+        log(f"[LIVE MODBUS] Tillämpat: TOU Slot 1 Ström={target_charge_amps} A ({next_charge_kw:.2f} kW), Urladda={next_discharge_kw:.2f} kW, Backup SOC={target_backup_soc}%")
 
     # Uppdatera status-sensor i HA
     client.post_state(
@@ -149,6 +192,15 @@ def main():
     )
 
     client.close()
+
+    # Uppdatera visualisering och GUI-dashboard
+    try:
+        plot_module.generate_plan_chart()
+        web_module.main()
+        log("Graf och web-dashboard uppdaterade.")
+    except Exception as e:
+        log(f"Varning: Kunde inte uppdatera web-dashboard: {e}")
+
     log("=== Kvartsoptimering slutförd ===")
 
 if __name__ == "__main__":

@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>BatteryControl Dashboard</title>
+  <!-- Chart.js för interaktiva, snabba grafer -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --card-border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --purple: #a855f7;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px;
+      line-height: 1.5;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 20px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .title-area h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .title-area .subtitle {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .badge-dry { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid #f59e0b; }
+    .badge-live { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; }
+    .badge-off { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; }
+
+    /* KPI Grid */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .kpi-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .kpi-title {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+    .kpi-value {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .kpi-sub {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    .kpi-val-green { color: var(--success); }
+    .kpi-val-accent { color: var(--accent); }
+    .kpi-val-warn { color: var(--warning); }
+
+    /* Chart Containers */
+    .chart-section {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 20px;
+    }
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .chart-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .chart-wrapper {
+      position: relative;
+      height: 280px;
+      width: 100%;
+    }
+
+    /* Table preview */
+    .table-section {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      text-align: left;
+    }
+    th {
+      color: var(--text-muted);
+      font-weight: 600;
+      border-bottom: 1px solid var(--card-border);
+      padding: 8px;
+    }
+    td {
+      padding: 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    tr:hover td {
+      background: rgba(255,255,255,0.03);
+    }
+    .tag-chg { color: var(--success); font-weight: 600; }
+    .tag-dis { color: var(--warning); font-weight: 600; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="title-area">
+      <h1>⚡ BatteryControl GUI</h1>
+      <div class="subtitle">Global LP-styrning med effekttaxa & spotprisarbitrage • Horisont: <span id="h-hours">--</span> h (<span id="h-q">--</span> kvartar)</div>
+    </div>
+    <div>
+      <span id="mode-badge" class="badge">--</span>
+      <span style="font-size: 0.8rem; color: var(--text-muted); margin-left: 8px;" id="gen-time">--</span>
+    </div>
+  </div>
+
+  <!-- KPI Grid -->
+  <div class="kpi-grid">
+    <div class="kpi-card">
+      <div class="kpi-title">Estimerad Nettovinst</div>
+      <div class="kpi-value kpi-val-green" id="kpi-profit">+0.00 kr</div>
+      <div class="kpi-sub" id="kpi-profit-sub">Arbitrage vs direktförbrukning</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-title">Batteri Status (SOC)</div>
+      <div class="kpi-value kpi-val-accent" id="kpi-soc">-- %</div>
+      <div class="kpi-sub" id="kpi-soc-sub">Mål 07:00: -- % | Spärr: -- %</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-title">Börvärde Just Nu</div>
+      <div class="kpi-value" id="kpi-next-flow">0.0 kW</div>
+      <div class="kpi-sub" id="kpi-spot-now">Spotpris: -- kr/kWh</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-title">Planerad Nätimport Max</div>
+      <div class="kpi-value kpi-val-warn" id="kpi-max-grid">0.0 kW</div>
+      <div class="kpi-sub">Säkringstak: 14.0 kW (20A)</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-title">Total Omsättning Plan</div>
+      <div class="kpi-value" id="kpi-throughput">0.0 kWh</div>
+      <div class="kpi-sub" id="kpi-wear">Slitage: 0.00 kr (30 öre/kWh)</div>
+    </div>
+  </div>
+
+  <!-- Graf 1: Konsumenter (Stacked Area) -->
+  <div class="chart-section">
+    <div class="chart-header">
+      <div class="chart-title">Konsumenter (kW)</div>
+    </div>
+    <div class="chart-wrapper">
+      <canvas id="consumersChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Graf 2: Producenter & Källor (Stacked Area) -->
+  <div class="chart-section">
+    <div class="chart-header">
+      <div class="chart-title">Producenter & Källor (kW)</div>
+    </div>
+    <div class="chart-wrapper">
+      <canvas id="producersChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Graf 2: Batteri SOC & Spotpris -->
+  <div class="chart-section">
+    <div class="chart-header">
+      <div class="chart-title">Batteri State of Charge (SOC %) vs Spotpris (kr/kWh)</div>
+      <div style="font-size: 0.8rem; color: var(--text-muted);">Importpris och laddcykler</div>
+    </div>
+    <div class="chart-wrapper">
+      <canvas id="socPriceChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Tabell över aktiva åtgärder -->
+  <div class="table-section">
+    <div class="chart-title" style="margin-bottom: 12px;">Planerade Batteriaktioner (Endast aktiva kvartar)</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Tid</th>
+          <th>Åtgärd</th>
+          <th>Effekt (kW)</th>
+          <th>Nätimport (kW)</th>
+          <th>SOC (%)</th>
+          <th>Spotpris In (kr)</th>
+        </tr>
+      </thead>
+      <tbody id="actions-table-body">
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const D = {"generated_at": "2026-11-01 15:33:51", "horizon_hours": 32.5, "horizon_quarters": 130, "current": {"soc_percent": 74.0, "voltage": 260.3, "backup_soc": 74, "active": true, "dry_run": false, "mode_text": "Aktiv styrning", "next_charge_kw": 0.0, "next_discharge_kw": 0.0, "next_import_kw": 2.8, "current_spot_in": 2.93}, "metrics": {"net_spot_savings_kr": 11.68, "cost_with_battery_kr": 255.35, "cost_without_battery_kr": 263.97, "battery_wear_cost_kr": 11.27, "terminal_adjustment_kr": 14.33, "total_charge_kwh": 42.1, "total_discharge_kwh": 33.1, "max_planned_grid_kw": 14.0, "target_07_soc": 97.0, "tariff_active_season": true}, "quarters": [{"time": "2026-11-01T15:30:00+01:00", "time_str": "Sun 15:30", "hour": 15, "minute": 30, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.932, "price_out": 1.919, "soc_kwh": 14.8, "soc_pct": 74.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.8, "grid_export_kw": 0.0, "load_kw": 2.85, "pv_kw": 0.04}, {"time": "2026-11-01T15:45:00+01:00", "time_str": "Sun 15:45", "hour": 15, "minute": 45, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.111, "price_out": 2.063, "soc_kwh": 14.8, "soc_pct": 74.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.8, "grid_export_kw": 0.0, "load_kw": 2.85, "pv_kw": 0.04}, {"time": "2026-11-01T16:00:00+01:00", "time_str": "Sun 16:00", "hour": 16, "minute": 0, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.006, "price_out": 1.978, "soc_kwh": 14.8, "soc_pct": 74.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.86, "grid_export_kw": 0.0, "load_kw": 2.87, "pv_kw": 0.01}, {"time": "2026-11-01T16:15:00+01:00", "time_str": "Sun 16:15", "hour": 16, "minute": 15, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.13, "price_out": 2.078, "soc_kwh": 14.05, "soc_pct": 70.2, "charge_kw": 0.0, "discharge_kw": 2.86, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 2.87, "pv_kw": 0.01}, {"time": "2026-11-01T16:30:00+01:00", "time_str": "Sun 16:30", "hour": 16, "minute": 30, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.286, "price_out": 2.203, "soc_kwh": 13.29, "soc_pct": 66.5, "charge_kw": 0.0, "discharge_kw": 2.87, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 2.87, "pv_kw": 0.0}, {"time": "2026-11-01T16:45:00+01:00", "time_str": "Sun 16:45", "hour": 16, "minute": 45, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.531, "price_out": 2.399, "soc_kwh": 12.54, "soc_pct": 62.7, "charge_kw": 0.0, "discharge_kw": 2.87, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 2.87, "pv_kw": 0.0}, {"time": "2026-11-01T17:00:00+01:00", "time_str": "Sun 17:00", "hour": 17, "minute": 0, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.238, "price_out": 2.164, "soc_kwh": 11.78, "soc_pct": 58.9, "charge_kw": 0.0, "discharge_kw": 2.88, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 2.88, "pv_kw": 0.0}, {"time": "2026-11-01T17:15:00+01:00", "time_str": "Sun 17:15", "hour": 17, "minute": 15, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.204, "price_out": 2.137, "soc_kwh": 11.02, "soc_pct": 55.1, "charge_kw": 0.0, "discharge_kw": 2.88, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 2.88, "pv_kw": 0.0}, {"time": "2026-11-01T17:30:00+01:00", "time_str": "Sun 17:30", "hour": 17, "minute": 30, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.277, "price_out": 2.196, "soc_kwh": 10.26, "soc_pct": 51.3, "charge_kw": 0.0, "discharge_kw": 2.88, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 2.88, "pv_kw": 0.0}, {"time": "2026-11-01T17:45:00+01:00", "time_str": "Sun 17:45", "hour": 17, "minute": 45, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.456, "price_out": 2.339, "soc_kwh": 9.51, "soc_pct": 47.5, "charge_kw": 0.0, "discharge_kw": 2.88, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 2.88, "pv_kw": 0.0}, {"time": "2026-11-01T18:00:00+01:00", "time_str": "Sun 18:00", "hour": 18, "minute": 0, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.212, "price_out": 2.144, "soc_kwh": 8.63, "soc_pct": 43.1, "charge_kw": 0.0, "discharge_kw": 3.33, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 3.33, "pv_kw": 0.0}, {"time": "2026-11-01T18:15:00+01:00", "time_str": "Sun 18:15", "hour": 18, "minute": 15, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.287, "price_out": 2.204, "soc_kwh": 7.75, "soc_pct": 38.8, "charge_kw": 0.0, "discharge_kw": 3.33, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 3.33, "pv_kw": 0.0}, {"time": "2026-11-01T18:30:00+01:00", "time_str": "Sun 18:30", "hour": 18, "minute": 30, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.419, "price_out": 2.309, "soc_kwh": 6.87, "soc_pct": 34.4, "charge_kw": 0.0, "discharge_kw": 3.33, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 3.33, "pv_kw": 0.0}, {"time": "2026-11-01T18:45:00+01:00", "time_str": "Sun 18:45", "hour": 18, "minute": 45, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.41, "price_out": 2.302, "soc_kwh": 6.0, "soc_pct": 30.0, "charge_kw": 0.0, "discharge_kw": 3.33, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 3.33, "pv_kw": 0.0}, {"time": "2026-11-01T19:00:00+01:00", "time_str": "Sun 19:00", "hour": 19, "minute": 0, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.348, "price_out": 2.252, "soc_kwh": 5.12, "soc_pct": 25.6, "charge_kw": 0.0, "discharge_kw": 3.34, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T19:15:00+01:00", "time_str": "Sun 19:15", "hour": 19, "minute": 15, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.298, "price_out": 2.212, "soc_kwh": 4.24, "soc_pct": 21.2, "charge_kw": 0.0, "discharge_kw": 3.34, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T19:30:00+01:00", "time_str": "Sun 19:30", "hour": 19, "minute": 30, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.243, "price_out": 2.168, "soc_kwh": 3.36, "soc_pct": 16.8, "charge_kw": 0.0, "discharge_kw": 3.34, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T19:45:00+01:00", "time_str": "Sun 19:45", "hour": 19, "minute": 45, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.287, "price_out": 2.203, "soc_kwh": 2.48, "soc_pct": 12.4, "charge_kw": 0.0, "discharge_kw": 3.34, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T20:00:00+01:00", "time_str": "Sun 20:00", "hour": 20, "minute": 0, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.378, "price_out": 2.277, "soc_kwh": 1.6, "soc_pct": 8.0, "charge_kw": 0.0, "discharge_kw": 3.35, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 3.35, "pv_kw": 0.0}, {"time": "2026-11-01T20:15:00+01:00", "time_str": "Sun 20:15", "hour": 20, "minute": 15, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.223, "price_out": 2.152, "soc_kwh": 0.72, "soc_pct": 3.6, "charge_kw": 0.0, "discharge_kw": 3.35, "grid_import_kw": 0.0, "grid_export_kw": 0.0, "load_kw": 3.35, "pv_kw": 0.0}, {"time": "2026-11-01T20:30:00+01:00", "time_str": "Sun 20:30", "hour": 20, "minute": 30, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.094, "price_out": 2.049, "soc_kwh": 0.72, "soc_pct": 3.6, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.35, "grid_export_kw": 0.0, "load_kw": 3.35, "pv_kw": 0.0}, {"time": "2026-11-01T20:45:00+01:00", "time_str": "Sun 20:45", "hour": 20, "minute": 45, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.908, "price_out": 1.901, "soc_kwh": 0.72, "soc_pct": 3.6, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.35, "grid_export_kw": 0.0, "load_kw": 3.35, "pv_kw": 0.0}, {"time": "2026-11-01T21:00:00+01:00", "time_str": "Sun 21:00", "hour": 21, "minute": 0, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 3.116, "price_out": 2.067, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 2.73, "grid_import_kw": 0.61, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T21:15:00+01:00", "time_str": "Sun 21:15", "hour": 21, "minute": 15, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.95, "price_out": 1.934, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.34, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T21:30:00+01:00", "time_str": "Sun 21:30", "hour": 21, "minute": 30, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.733, "price_out": 1.76, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.34, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T21:45:00+01:00", "time_str": "Sun 21:45", "hour": 21, "minute": 45, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.463, "price_out": 1.544, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.34, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T22:00:00+01:00", "time_str": "Sun 22:00", "hour": 22, "minute": 0, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.911, "price_out": 1.903, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.34, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T22:15:00+01:00", "time_str": "Sun 22:15", "hour": 22, "minute": 15, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.676, "price_out": 1.715, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.34, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T22:30:00+01:00", "time_str": "Sun 22:30", "hour": 22, "minute": 30, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.402, "price_out": 1.495, "soc_kwh": 1.19, "soc_pct": 5.9, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 8.34, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T22:45:00+01:00", "time_str": "Sun 22:45", "hour": 22, "minute": 45, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.26, "price_out": 1.382, "soc_kwh": 3.52, "soc_pct": 17.6, "charge_kw": 9.8, "discharge_kw": 0.0, "grid_import_kw": 13.14, "grid_export_kw": 0.0, "load_kw": 3.34, "pv_kw": 0.0}, {"time": "2026-11-01T23:00:00+01:00", "time_str": "Sun 23:00", "hour": 23, "minute": 0, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.284, "price_out": 1.401, "soc_kwh": 5.84, "soc_pct": 29.2, "charge_kw": 9.8, "discharge_kw": 0.0, "grid_import_kw": 12.5, "grid_export_kw": 0.0, "load_kw": 2.7, "pv_kw": 0.0}, {"time": "2026-11-01T23:15:00+01:00", "time_str": "Sun 23:15", "hour": 23, "minute": 15, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.304, "price_out": 1.417, "soc_kwh": 8.17, "soc_pct": 40.9, "charge_kw": 9.8, "discharge_kw": 0.0, "grid_import_kw": 12.5, "grid_export_kw": 0.0, "load_kw": 2.7, "pv_kw": 0.0}, {"time": "2026-11-01T23:30:00+01:00", "time_str": "Sun 23:30", "hour": 23, "minute": 30, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.288, "price_out": 1.404, "soc_kwh": 10.5, "soc_pct": 52.5, "charge_kw": 9.8, "discharge_kw": 0.0, "grid_import_kw": 12.5, "grid_export_kw": 0.0, "load_kw": 2.7, "pv_kw": 0.0}, {"time": "2026-11-01T23:45:00+01:00", "time_str": "Sun 23:45", "hour": 23, "minute": 45, "day_name": "Sunday", "day_str": "Sun 01 Nov", "price_in": 2.311, "price_out": 1.423, "soc_kwh": 11.69, "soc_pct": 58.4, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 7.7, "grid_export_kw": 0.0, "load_kw": 2.7, "pv_kw": 0.0}, {"time": "2026-11-02T00:00:00+01:00", "time_str": "Mon 00:00", "hour": 0, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.472, "price_out": 1.551, "soc_kwh": 11.69, "soc_pct": 58.4, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.71, "grid_export_kw": 0.0, "load_kw": 2.71, "pv_kw": 0.0}, {"time": "2026-11-02T00:15:00+01:00", "time_str": "Mon 00:15", "hour": 0, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.49, "price_out": 1.566, "soc_kwh": 11.69, "soc_pct": 58.4, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.71, "grid_export_kw": 0.0, "load_kw": 2.71, "pv_kw": 0.0}, {"time": "2026-11-02T00:30:00+01:00", "time_str": "Mon 00:30", "hour": 0, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.416, "price_out": 1.507, "soc_kwh": 12.88, "soc_pct": 64.4, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 7.71, "grid_export_kw": 0.0, "load_kw": 2.71, "pv_kw": 0.0}, {"time": "2026-11-02T00:45:00+01:00", "time_str": "Mon 00:45", "hour": 0, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.422, "price_out": 1.512, "soc_kwh": 14.06, "soc_pct": 70.3, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 7.71, "grid_export_kw": 0.0, "load_kw": 2.71, "pv_kw": 0.0}, {"time": "2026-11-02T01:00:00+01:00", "time_str": "Mon 01:00", "hour": 1, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.402, "price_out": 1.495, "soc_kwh": 15.25, "soc_pct": 76.2, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 7.48, "grid_export_kw": 0.0, "load_kw": 2.48, "pv_kw": 0.0}, {"time": "2026-11-02T01:15:00+01:00", "time_str": "Mon 01:15", "hour": 1, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.402, "price_out": 1.495, "soc_kwh": 16.44, "soc_pct": 82.2, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 7.48, "grid_export_kw": 0.0, "load_kw": 2.48, "pv_kw": 0.0}, {"time": "2026-11-02T01:30:00+01:00", "time_str": "Mon 01:30", "hour": 1, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.53, "price_out": 1.598, "soc_kwh": 16.44, "soc_pct": 82.2, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.48, "grid_export_kw": 0.0, "load_kw": 2.48, "pv_kw": 0.0}, {"time": "2026-11-02T01:45:00+01:00", "time_str": "Mon 01:45", "hour": 1, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.447, "price_out": 1.532, "soc_kwh": 17.62, "soc_pct": 88.1, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 7.48, "grid_export_kw": 0.0, "load_kw": 2.48, "pv_kw": 0.0}, {"time": "2026-11-02T02:00:00+01:00", "time_str": "Mon 02:00", "hour": 2, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.429, "price_out": 1.517, "soc_kwh": 18.81, "soc_pct": 94.1, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 7.48, "grid_export_kw": 0.0, "load_kw": 2.48, "pv_kw": 0.0}, {"time": "2026-11-02T02:15:00+01:00", "time_str": "Mon 02:15", "hour": 2, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.402, "price_out": 1.495, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 7.48, "grid_export_kw": 0.0, "load_kw": 2.48, "pv_kw": 0.0}, {"time": "2026-11-02T02:30:00+01:00", "time_str": "Mon 02:30", "hour": 2, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.459, "price_out": 1.541, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.48, "grid_export_kw": 0.0, "load_kw": 2.48, "pv_kw": 0.0}, {"time": "2026-11-02T02:45:00+01:00", "time_str": "Mon 02:45", "hour": 2, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.532, "price_out": 1.6, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.48, "grid_export_kw": 0.0, "load_kw": 2.48, "pv_kw": 0.0}, {"time": "2026-11-02T03:00:00+01:00", "time_str": "Mon 03:00", "hour": 3, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.454, "price_out": 1.537, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.52, "grid_export_kw": 0.0, "load_kw": 2.52, "pv_kw": 0.0}, {"time": "2026-11-02T03:15:00+01:00", "time_str": "Mon 03:15", "hour": 3, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.418, "price_out": 1.508, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.52, "grid_export_kw": 0.0, "load_kw": 2.52, "pv_kw": 0.0}, {"time": "2026-11-02T03:30:00+01:00", "time_str": "Mon 03:30", "hour": 3, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.495, "price_out": 1.57, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.52, "grid_export_kw": 0.0, "load_kw": 2.52, "pv_kw": 0.0}, {"time": "2026-11-02T03:45:00+01:00", "time_str": "Mon 03:45", "hour": 3, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.509, "price_out": 1.581, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.52, "grid_export_kw": 0.0, "load_kw": 2.52, "pv_kw": 0.0}, {"time": "2026-11-02T04:00:00+01:00", "time_str": "Mon 04:00", "hour": 4, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.403, "price_out": 1.497, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.54, "grid_export_kw": 0.0, "load_kw": 2.54, "pv_kw": 0.0}, {"time": "2026-11-02T04:15:00+01:00", "time_str": "Mon 04:15", "hour": 4, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.443, "price_out": 1.529, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.54, "grid_export_kw": 0.0, "load_kw": 2.54, "pv_kw": 0.0}, {"time": "2026-11-02T04:30:00+01:00", "time_str": "Mon 04:30", "hour": 4, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.526, "price_out": 1.595, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.54, "grid_export_kw": 0.0, "load_kw": 2.54, "pv_kw": 0.0}, {"time": "2026-11-02T04:45:00+01:00", "time_str": "Mon 04:45", "hour": 4, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.582, "price_out": 1.639, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.54, "grid_export_kw": 0.0, "load_kw": 2.54, "pv_kw": 0.0}, {"time": "2026-11-02T05:00:00+01:00", "time_str": "Mon 05:00", "hour": 5, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.424, "price_out": 1.513, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.57, "grid_export_kw": 0.0, "load_kw": 2.57, "pv_kw": 0.0}, {"time": "2026-11-02T05:15:00+01:00", "time_str": "Mon 05:15", "hour": 5, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.449, "price_out": 1.534, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.57, "grid_export_kw": 0.0, "load_kw": 2.57, "pv_kw": 0.0}, {"time": "2026-11-02T05:30:00+01:00", "time_str": "Mon 05:30", "hour": 5, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.58, "price_out": 1.638, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.57, "grid_export_kw": 0.0, "load_kw": 2.57, "pv_kw": 0.0}, {"time": "2026-11-02T05:45:00+01:00", "time_str": "Mon 05:45", "hour": 5, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.611, "price_out": 1.663, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.57, "grid_export_kw": 0.0, "load_kw": 2.57, "pv_kw": 0.0}, {"time": "2026-11-02T06:00:00+01:00", "time_str": "Mon 06:00", "hour": 6, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.601, "price_out": 2.455, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.58, "grid_export_kw": 0.0, "load_kw": 2.58, "pv_kw": 0.0}, {"time": "2026-11-02T06:15:00+01:00", "time_str": "Mon 06:15", "hour": 6, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 4.03, "price_out": 2.798, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.58, "grid_export_kw": 0.0, "load_kw": 2.58, "pv_kw": 0.0}, {"time": "2026-11-02T06:30:00+01:00", "time_str": "Mon 06:30", "hour": 6, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 4.386, "price_out": 3.083, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.58, "grid_export_kw": 0.0, "load_kw": 2.58, "pv_kw": 0.0}, {"time": "2026-11-02T06:45:00+01:00", "time_str": "Mon 06:45", "hour": 6, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 4.735, "price_out": 3.362, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 2.58, "grid_export_kw": 0.0, "load_kw": 2.58, "pv_kw": 0.0}, {"time": "2026-11-02T07:00:00+01:00", "time_str": "Mon 07:00", "hour": 7, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.52, "price_out": 1.59, "soc_kwh": 19.4, "soc_pct": 97.0, "charge_kw": 0.0, "discharge_kw": 2.27, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.46, "pv_kw": 0.0}, {"time": "2026-11-02T07:15:00+01:00", "time_str": "Mon 07:15", "hour": 7, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.441, "price_out": 1.527, "soc_kwh": 18.81, "soc_pct": 94.0, "charge_kw": 0.0, "discharge_kw": 2.27, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.46, "pv_kw": 0.0}, {"time": "2026-11-02T07:30:00+01:00", "time_str": "Mon 07:30", "hour": 7, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.865, "price_out": 1.866, "soc_kwh": 18.22, "soc_pct": 91.1, "charge_kw": 0.0, "discharge_kw": 2.23, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.46, "pv_kw": 0.03}, {"time": "2026-11-02T07:45:00+01:00", "time_str": "Mon 07:45", "hour": 7, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.238, "price_out": 2.164, "soc_kwh": 17.63, "soc_pct": 88.2, "charge_kw": 0.0, "discharge_kw": 2.23, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.46, "pv_kw": 0.03}, {"time": "2026-11-02T08:00:00+01:00", "time_str": "Mon 08:00", "hour": 8, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.815, "price_out": 1.826, "soc_kwh": 17.06, "soc_pct": 85.3, "charge_kw": 0.0, "discharge_kw": 2.16, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.47, "pv_kw": 0.12}, {"time": "2026-11-02T08:15:00+01:00", "time_str": "Mon 08:15", "hour": 8, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.896, "price_out": 1.89, "soc_kwh": 16.5, "soc_pct": 82.5, "charge_kw": 0.0, "discharge_kw": 2.16, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.47, "pv_kw": 0.12}, {"time": "2026-11-02T08:30:00+01:00", "time_str": "Mon 08:30", "hour": 8, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.159, "price_out": 2.101, "soc_kwh": 15.96, "soc_pct": 79.8, "charge_kw": 0.0, "discharge_kw": 2.05, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.47, "pv_kw": 0.23}, {"time": "2026-11-02T08:45:00+01:00", "time_str": "Mon 08:45", "hour": 8, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.196, "price_out": 2.131, "soc_kwh": 15.42, "soc_pct": 77.1, "charge_kw": 0.0, "discharge_kw": 2.05, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.47, "pv_kw": 0.23}, {"time": "2026-11-02T09:00:00+01:00", "time_str": "Mon 09:00", "hour": 9, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.134, "price_out": 1.281, "soc_kwh": 14.92, "soc_pct": 74.6, "charge_kw": 0.0, "discharge_kw": 1.87, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.47, "pv_kw": 0.41}, {"time": "2026-11-02T09:15:00+01:00", "time_str": "Mon 09:15", "hour": 9, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.218, "price_out": 1.348, "soc_kwh": 14.43, "soc_pct": 72.2, "charge_kw": 0.0, "discharge_kw": 1.87, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.47, "pv_kw": 0.41}, {"time": "2026-11-02T09:30:00+01:00", "time_str": "Mon 09:30", "hour": 9, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.187, "price_out": 1.324, "soc_kwh": 14.16, "soc_pct": 70.8, "charge_kw": 0.0, "discharge_kw": 1.03, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.82, "pv_kw": 0.6}, {"time": "2026-11-02T09:45:00+01:00", "time_str": "Mon 09:45", "hour": 9, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.243, "price_out": 1.369, "soc_kwh": 13.89, "soc_pct": 69.4, "charge_kw": 0.0, "discharge_kw": 1.03, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.82, "pv_kw": 0.6}, {"time": "2026-11-02T10:00:00+01:00", "time_str": "Mon 10:00", "hour": 10, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.096, "price_out": 1.251, "soc_kwh": 13.67, "soc_pct": 68.3, "charge_kw": 0.0, "discharge_kw": 0.84, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.81, "pv_kw": 0.78}, {"time": "2026-11-02T10:15:00+01:00", "time_str": "Mon 10:15", "hour": 10, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.153, "price_out": 1.296, "soc_kwh": 13.45, "soc_pct": 67.2, "charge_kw": 0.0, "discharge_kw": 0.84, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.81, "pv_kw": 0.78}, {"time": "2026-11-02T10:30:00+01:00", "time_str": "Mon 10:30", "hour": 10, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.216, "price_out": 1.347, "soc_kwh": 13.27, "soc_pct": 66.4, "charge_kw": 0.0, "discharge_kw": 0.66, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.81, "pv_kw": 0.95}, {"time": "2026-11-02T10:45:00+01:00", "time_str": "Mon 10:45", "hour": 10, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.269, "price_out": 1.389, "soc_kwh": 13.1, "soc_pct": 65.5, "charge_kw": 0.0, "discharge_kw": 0.66, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.81, "pv_kw": 0.95}, {"time": "2026-11-02T11:00:00+01:00", "time_str": "Mon 11:00", "hour": 11, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.094, "price_out": 1.249, "soc_kwh": 12.96, "soc_pct": 64.8, "charge_kw": 0.0, "discharge_kw": 0.52, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.07}, {"time": "2026-11-02T11:15:00+01:00", "time_str": "Mon 11:15", "hour": 11, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.23, "price_out": 1.358, "soc_kwh": 12.82, "soc_pct": 64.1, "charge_kw": 0.0, "discharge_kw": 0.52, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.07}, {"time": "2026-11-02T11:30:00+01:00", "time_str": "Mon 11:30", "hour": 11, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.249, "price_out": 1.373, "soc_kwh": 12.69, "soc_pct": 63.4, "charge_kw": 0.0, "discharge_kw": 0.51, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.07}, {"time": "2026-11-02T11:45:00+01:00", "time_str": "Mon 11:45", "hour": 11, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.344, "price_out": 1.45, "soc_kwh": 12.56, "soc_pct": 62.8, "charge_kw": 0.0, "discharge_kw": 0.51, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.07}, {"time": "2026-11-02T12:00:00+01:00", "time_str": "Mon 12:00", "hour": 12, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.241, "price_out": 1.367, "soc_kwh": 12.42, "soc_pct": 62.1, "charge_kw": 0.0, "discharge_kw": 0.5, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.08}, {"time": "2026-11-02T12:15:00+01:00", "time_str": "Mon 12:15", "hour": 12, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.245, "price_out": 1.37, "soc_kwh": 12.29, "soc_pct": 61.5, "charge_kw": 0.0, "discharge_kw": 0.5, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.08}, {"time": "2026-11-02T12:30:00+01:00", "time_str": "Mon 12:30", "hour": 12, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.248, "price_out": 1.373, "soc_kwh": 12.14, "soc_pct": 60.7, "charge_kw": 0.0, "discharge_kw": 0.57, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.01}, {"time": "2026-11-02T12:45:00+01:00", "time_str": "Mon 12:45", "hour": 12, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.162, "price_out": 1.304, "soc_kwh": 11.99, "soc_pct": 60.0, "charge_kw": 0.0, "discharge_kw": 0.57, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.01}, {"time": "2026-11-02T13:00:00+01:00", "time_str": "Mon 13:00", "hour": 13, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.224, "price_out": 1.353, "soc_kwh": 11.85, "soc_pct": 59.2, "charge_kw": 0.0, "discharge_kw": 0.56, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.03}, {"time": "2026-11-02T13:15:00+01:00", "time_str": "Mon 13:15", "hour": 13, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.259, "price_out": 1.381, "soc_kwh": 11.7, "soc_pct": 58.5, "charge_kw": 0.0, "discharge_kw": 0.56, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.03}, {"time": "2026-11-02T13:30:00+01:00", "time_str": "Mon 13:30", "hour": 13, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.14, "price_out": 1.286, "soc_kwh": 11.55, "soc_pct": 57.8, "charge_kw": 0.0, "discharge_kw": 0.56, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.03}, {"time": "2026-11-02T13:45:00+01:00", "time_str": "Mon 13:45", "hour": 13, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.06, "price_out": 1.222, "soc_kwh": 11.41, "soc_pct": 57.0, "charge_kw": 0.0, "discharge_kw": 0.56, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.03}, {"time": "2026-11-02T14:00:00+01:00", "time_str": "Mon 14:00", "hour": 14, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.305, "price_out": 1.418, "soc_kwh": 11.27, "soc_pct": 56.4, "charge_kw": 0.0, "discharge_kw": 0.52, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.07}, {"time": "2026-11-02T14:15:00+01:00", "time_str": "Mon 14:15", "hour": 14, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.226, "price_out": 1.354, "soc_kwh": 11.13, "soc_pct": 55.7, "charge_kw": 0.0, "discharge_kw": 0.52, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.07}, {"time": "2026-11-02T14:30:00+01:00", "time_str": "Mon 14:30", "hour": 14, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.049, "price_out": 1.213, "soc_kwh": 11.01, "soc_pct": 55.1, "charge_kw": 0.0, "discharge_kw": 0.46, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.12}, {"time": "2026-11-02T14:45:00+01:00", "time_str": "Mon 14:45", "hour": 14, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.156, "price_out": 1.299, "soc_kwh": 10.89, "soc_pct": 54.5, "charge_kw": 0.0, "discharge_kw": 0.46, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.77, "pv_kw": 1.12}, {"time": "2026-11-02T15:00:00+01:00", "time_str": "Mon 15:00", "hour": 15, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.571, "price_out": 1.631, "soc_kwh": 10.69, "soc_pct": 53.5, "charge_kw": 0.0, "discharge_kw": 0.74, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.8, "pv_kw": 0.86}, {"time": "2026-11-02T15:15:00+01:00", "time_str": "Mon 15:15", "hour": 15, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.518, "price_out": 1.588, "soc_kwh": 10.5, "soc_pct": 52.5, "charge_kw": 0.0, "discharge_kw": 0.74, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.8, "pv_kw": 0.86}, {"time": "2026-11-02T15:30:00+01:00", "time_str": "Mon 15:30", "hour": 15, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.37, "price_out": 1.47, "soc_kwh": 10.15, "soc_pct": 50.7, "charge_kw": 0.0, "discharge_kw": 1.34, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.8, "pv_kw": 0.27}, {"time": "2026-11-02T15:45:00+01:00", "time_str": "Mon 15:45", "hour": 15, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.371, "price_out": 1.471, "soc_kwh": 9.79, "soc_pct": 49.0, "charge_kw": 0.0, "discharge_kw": 1.34, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.8, "pv_kw": 0.27}, {"time": "2026-11-02T16:00:00+01:00", "time_str": "Mon 16:00", "hour": 16, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.451, "price_out": 2.335, "soc_kwh": 9.35, "soc_pct": 46.8, "charge_kw": 0.0, "discharge_kw": 1.67, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.88, "pv_kw": 0.02}, {"time": "2026-11-02T16:15:00+01:00", "time_str": "Mon 16:15", "hour": 16, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.351, "price_out": 2.255, "soc_kwh": 8.92, "soc_pct": 44.6, "charge_kw": 0.0, "discharge_kw": 1.67, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.88, "pv_kw": 0.02}, {"time": "2026-11-02T16:30:00+01:00", "time_str": "Mon 16:30", "hour": 16, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.515, "price_out": 2.386, "soc_kwh": 8.47, "soc_pct": 42.4, "charge_kw": 0.0, "discharge_kw": 1.69, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.88, "pv_kw": 0.0}, {"time": "2026-11-02T16:45:00+01:00", "time_str": "Mon 16:45", "hour": 16, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.362, "price_out": 2.263, "soc_kwh": 8.03, "soc_pct": 40.1, "charge_kw": 0.0, "discharge_kw": 1.69, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.88, "pv_kw": 0.0}, {"time": "2026-11-02T17:00:00+01:00", "time_str": "Mon 17:00", "hour": 17, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.767, "price_out": 2.587, "soc_kwh": 7.56, "soc_pct": 37.8, "charge_kw": 0.0, "discharge_kw": 1.78, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.97, "pv_kw": 0.0}, {"time": "2026-11-02T17:15:00+01:00", "time_str": "Mon 17:15", "hour": 17, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.641, "price_out": 2.487, "soc_kwh": 7.09, "soc_pct": 35.4, "charge_kw": 0.0, "discharge_kw": 1.78, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 2.97, "pv_kw": 0.0}, {"time": "2026-11-02T17:30:00+01:00", "time_str": "Mon 17:30", "hour": 17, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.625, "price_out": 2.474, "soc_kwh": 6.4, "soc_pct": 32.0, "charge_kw": 0.0, "discharge_kw": 2.63, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.82, "pv_kw": 0.0}, {"time": "2026-11-02T17:45:00+01:00", "time_str": "Mon 17:45", "hour": 17, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.337, "price_out": 2.243, "soc_kwh": 5.7, "soc_pct": 28.5, "charge_kw": 0.0, "discharge_kw": 2.63, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.82, "pv_kw": 0.0}, {"time": "2026-11-02T18:00:00+01:00", "time_str": "Mon 18:00", "hour": 18, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 4.362, "price_out": 3.064, "soc_kwh": 5.0, "soc_pct": 25.0, "charge_kw": 0.0, "discharge_kw": 2.68, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.87, "pv_kw": 0.0}, {"time": "2026-11-02T18:15:00+01:00", "time_str": "Mon 18:15", "hour": 18, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 4.076, "price_out": 2.835, "soc_kwh": 4.29, "soc_pct": 21.5, "charge_kw": 0.0, "discharge_kw": 2.68, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.87, "pv_kw": 0.0}, {"time": "2026-11-02T18:30:00+01:00", "time_str": "Mon 18:30", "hour": 18, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.846, "price_out": 2.651, "soc_kwh": 3.59, "soc_pct": 17.9, "charge_kw": 0.0, "discharge_kw": 2.68, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.87, "pv_kw": 0.0}, {"time": "2026-11-02T18:45:00+01:00", "time_str": "Mon 18:45", "hour": 18, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.748, "price_out": 2.572, "soc_kwh": 2.88, "soc_pct": 14.4, "charge_kw": 0.0, "discharge_kw": 2.68, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.87, "pv_kw": 0.0}, {"time": "2026-11-02T19:00:00+01:00", "time_str": "Mon 19:00", "hour": 19, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 4.355, "price_out": 3.058, "soc_kwh": 2.16, "soc_pct": 10.8, "charge_kw": 0.0, "discharge_kw": 2.74, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.92, "pv_kw": 0.0}, {"time": "2026-11-02T19:15:00+01:00", "time_str": "Mon 19:15", "hour": 19, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 3.743, "price_out": 2.568, "soc_kwh": 1.44, "soc_pct": 7.2, "charge_kw": 0.0, "discharge_kw": 2.74, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.92, "pv_kw": 0.0}, {"time": "2026-11-02T19:30:00+01:00", "time_str": "Mon 19:30", "hour": 19, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.9, "price_out": 1.894, "soc_kwh": 0.72, "soc_pct": 3.6, "charge_kw": 0.0, "discharge_kw": 2.74, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.92, "pv_kw": 0.0}, {"time": "2026-11-02T19:45:00+01:00", "time_str": "Mon 19:45", "hour": 19, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.539, "price_out": 1.605, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 2.74, "grid_import_kw": 1.19, "grid_export_kw": 0.0, "load_kw": 3.92, "pv_kw": 0.0}, {"time": "2026-11-02T20:00:00+01:00", "time_str": "Mon 20:00", "hour": 20, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.848, "price_out": 1.852, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.99, "grid_export_kw": 0.0, "load_kw": 3.99, "pv_kw": 0.0}, {"time": "2026-11-02T20:15:00+01:00", "time_str": "Mon 20:15", "hour": 20, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.539, "price_out": 1.605, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.99, "grid_export_kw": 0.0, "load_kw": 3.99, "pv_kw": 0.0}, {"time": "2026-11-02T20:30:00+01:00", "time_str": "Mon 20:30", "hour": 20, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.539, "price_out": 1.605, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.99, "grid_export_kw": 0.0, "load_kw": 3.99, "pv_kw": 0.0}, {"time": "2026-11-02T20:45:00+01:00", "time_str": "Mon 20:45", "hour": 20, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.428, "price_out": 1.516, "soc_kwh": 0.0, "soc_pct": 0.0, "charge_kw": 0.0, "discharge_kw": 0.0, "grid_import_kw": 3.99, "grid_export_kw": 0.0, "load_kw": 3.99, "pv_kw": 0.0}, {"time": "2026-11-02T21:00:00+01:00", "time_str": "Mon 21:00", "hour": 21, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.083, "price_out": 1.24, "soc_kwh": 2.36, "soc_pct": 11.8, "charge_kw": 9.94, "discharge_kw": 0.0, "grid_import_kw": 14.0, "grid_export_kw": 0.0, "load_kw": 4.06, "pv_kw": 0.0}, {"time": "2026-11-02T21:15:00+01:00", "time_str": "Mon 21:15", "hour": 21, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.111, "price_out": 1.263, "soc_kwh": 4.72, "soc_pct": 23.6, "charge_kw": 9.94, "discharge_kw": 0.0, "grid_import_kw": 14.0, "grid_export_kw": 0.0, "load_kw": 4.06, "pv_kw": 0.0}, {"time": "2026-11-02T21:30:00+01:00", "time_str": "Mon 21:30", "hour": 21, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.166, "price_out": 1.306, "soc_kwh": 7.08, "soc_pct": 35.4, "charge_kw": 9.94, "discharge_kw": 0.0, "grid_import_kw": 14.0, "grid_export_kw": 0.0, "load_kw": 4.06, "pv_kw": 0.0}, {"time": "2026-11-02T21:45:00+01:00", "time_str": "Mon 21:45", "hour": 21, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.287, "price_out": 1.404, "soc_kwh": 8.83, "soc_pct": 44.1, "charge_kw": 7.35, "discharge_kw": 0.0, "grid_import_kw": 11.41, "grid_export_kw": 0.0, "load_kw": 4.06, "pv_kw": 0.0}, {"time": "2026-11-02T22:00:00+01:00", "time_str": "Mon 22:00", "hour": 22, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.214, "price_out": 1.345, "soc_kwh": 10.57, "soc_pct": 52.9, "charge_kw": 7.35, "discharge_kw": 0.0, "grid_import_kw": 11.47, "grid_export_kw": 0.0, "load_kw": 4.13, "pv_kw": 0.0}, {"time": "2026-11-02T22:15:00+01:00", "time_str": "Mon 22:15", "hour": 22, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.247, "price_out": 1.372, "soc_kwh": 12.32, "soc_pct": 61.6, "charge_kw": 7.35, "discharge_kw": 0.0, "grid_import_kw": 11.47, "grid_export_kw": 0.0, "load_kw": 4.13, "pv_kw": 0.0}, {"time": "2026-11-02T22:30:00+01:00", "time_str": "Mon 22:30", "hour": 22, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.238, "price_out": 1.364, "soc_kwh": 14.06, "soc_pct": 70.3, "charge_kw": 7.35, "discharge_kw": 0.0, "grid_import_kw": 10.58, "grid_export_kw": 0.0, "load_kw": 3.23, "pv_kw": 0.0}, {"time": "2026-11-02T22:45:00+01:00", "time_str": "Mon 22:45", "hour": 22, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.275, "price_out": 1.394, "soc_kwh": 15.25, "soc_pct": 76.3, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 8.23, "grid_export_kw": 0.0, "load_kw": 3.23, "pv_kw": 0.0}, {"time": "2026-11-02T23:00:00+01:00", "time_str": "Mon 23:00", "hour": 23, "minute": 0, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.255, "price_out": 1.378, "soc_kwh": 16.44, "soc_pct": 82.2, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 8.28, "grid_export_kw": 0.0, "load_kw": 3.28, "pv_kw": 0.0}, {"time": "2026-11-02T23:15:00+01:00", "time_str": "Mon 23:15", "hour": 23, "minute": 15, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.261, "price_out": 1.383, "soc_kwh": 17.63, "soc_pct": 88.1, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 8.28, "grid_export_kw": 0.0, "load_kw": 3.28, "pv_kw": 0.0}, {"time": "2026-11-02T23:30:00+01:00", "time_str": "Mon 23:30", "hour": 23, "minute": 30, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.271, "price_out": 1.391, "soc_kwh": 18.81, "soc_pct": 94.1, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 8.28, "grid_export_kw": 0.0, "load_kw": 3.28, "pv_kw": 0.0}, {"time": "2026-11-02T23:45:00+01:00", "time_str": "Mon 23:45", "hour": 23, "minute": 45, "day_name": "Monday", "day_str": "Mon 02 Nov", "price_in": 2.262, "price_out": 1.383, "soc_kwh": 20.0, "soc_pct": 100.0, "charge_kw": 5.0, "discharge_kw": 0.0, "grid_import_kw": 8.28, "grid_export_kw": 0.0, "load_kw": 3.28, "pv_kw": 0.0}]};
+
+    // Fyll KPI:er
+    document.getElementById("h-hours").innerText = D.horizon_hours;
+    document.getElementById("h-q").innerText = D.horizon_quarters;
+    document.getElementById("gen-time").innerText = "Uppdaterad: " + D.generated_at;
+
+    const badge = document.getElementById("mode-badge");
+    if (D.current.dry_run) {
+      badge.innerText = "Skuggläge (Dry Run)";
+      badge.className = "badge badge-dry";
+    } else if (D.current.active) {
+      badge.innerText = "Aktiv Styrning (Live)";
+      badge.className = "badge badge-live";
+    } else {
+      badge.innerText = "Inaktiv";
+      badge.className = "badge badge-off";
+    }
+
+    document.getElementById("kpi-profit").innerText = (D.metrics.net_spot_savings_kr >= 0 ? "+" : "") + D.metrics.net_spot_savings_kr.toFixed(2) + " kr";
+    document.getElementById("kpi-profit-sub").innerText = "Utan batteri: " + D.metrics.cost_without_battery_kr.toFixed(1) + " kr | Med: " + D.metrics.cost_with_battery_kr.toFixed(1) + " kr";
+
+    document.getElementById("kpi-soc").innerText = D.current.soc_percent.toFixed(1) + " %";
+    document.getElementById("kpi-soc-sub").innerText = "Mål 07:00: " + (D.metrics.target_07_soc ? D.metrics.target_07_soc.toFixed(0) + "%" : "Ej aktiv") + " | Spärr: " + D.current.backup_soc + "%";
+
+    if (D.current.next_charge_kw > 0.05) {
+      document.getElementById("kpi-next-flow").innerHTML = '<span class="tag-chg">+' + D.current.next_charge_kw.toFixed(2) + ' kW (Laddar)</span>';
+    } else if (D.current.next_discharge_kw > 0.05) {
+      document.getElementById("kpi-next-flow").innerHTML = '<span class="tag-dis">-' + D.current.next_discharge_kw.toFixed(2) + ' kW (Urladdar)</span>';
+    } else {
+      document.getElementById("kpi-next-flow").innerText = "0.0 kW (Väntar)";
+    }
+    document.getElementById("kpi-spot-now").innerText = "Spotpris nu: " + D.current.current_spot_in.toFixed(2) + " kr/kWh";
+
+    document.getElementById("kpi-max-grid").innerText = D.metrics.max_planned_grid_kw.toFixed(2) + " kW";
+    document.getElementById("kpi-throughput").innerText = "Ladd " + D.metrics.total_charge_kwh.toFixed(1) + " / Ur " + D.metrics.total_discharge_kwh.toFixed(1) + " kWh";
+    document.getElementById("kpi-wear").innerText = "Slitagekostnad: " + D.metrics.battery_wear_cost_kr.toFixed(2) + " kr";
+
+    // Förbered data för grafer
+    const quarters = D.quarters;
+    const gridImport = quarters.map(q => q.grid_import_kw);
+    const houseLoad = quarters.map(q => q.load_kw);
+    const chargeKw = quarters.map(q => q.charge_kw);
+    const dischargeKw = quarters.map(q => q.discharge_kw);
+    const pvKw = quarters.map(q => q.pv_kw);
+    const gridExport = quarters.map(q => q.grid_export_kw);
+    const socPct = quarters.map(q => q.soc_pct);
+    const priceIn = quarters.map(q => q.price_in);
+
+    // Tidsaxel-formatering:
+    // 1. Ange bara jämna timmar med klockslag (t.ex. 13).
+    // 2. Ange dag en gång placerad mellan 00 och 01 (vid 00:00).
+    // 3. Om horisonten börjar efter 00 visas startdagens namn på första jämna timmen.
+    const axisLabels = quarters.map((q, idx) => {
+      if (q.hour === 0 && q.minute === 0) {
+        return q.day_str;
+      }
+      if (idx === 0 || (idx < 4 && q.minute === 0)) {
+        // Visa första timmen tydligt
+        if (q.minute === 0) {
+          return q.hour + ":00 (" + q.day_name.substring(0,3) + ")";
+        }
+      }
+      if (q.minute === 0) {
+        return String(q.hour);
+      }
+      return "";
+    });
+
+    // Gemensamma inställningar för att ta bort punkter/ringar
+    const noPointConfig = {
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      pointHitRadius: 8
+    };
+
+    // Gemensam X-axelkonfiguration
+    const sharedXAxis = {
+      grid: {
+        color: (ctx) => {
+          const q = quarters[ctx.index];
+          if (!q) return 'rgba(255,255,255,0.03)';
+          if (q.hour === 0 && q.minute === 0) return 'rgba(56, 189, 248, 0.4)'; // Markera midnatt tydligt
+          if (q.minute === 0) return 'rgba(255,255,255,0.08)';
+          return 'transparent';
+        },
+        lineWidth: (ctx) => {
+          const q = quarters[ctx.index];
+          return (q && q.hour === 0 && q.minute === 0) ? 2 : 1;
+        }
+      },
+      ticks: {
+        color: (ctx) => {
+          const q = quarters[ctx.index];
+          if (q && q.hour === 0 && q.minute === 0) return '#38bdf8';
+          return '#94a3b8';
+        },
+        font: (ctx) => {
+          const q = quarters[ctx.index];
+          if (q && q.hour === 0 && q.minute === 0) return { weight: 'bold', size: 11 };
+          return { size: 10 };
+        },
+        autoSkip: false,
+        maxRotation: 0,
+        minRotation: 0,
+        callback: function(val, index) {
+          return axisLabels[index];
+        }
+      }
+    };
+
+    // Chart 1: Konsumenter (Stacked Area)
+    new Chart(document.getElementById('consumersChart'), {
+      type: 'line',
+      data: {
+        labels: quarters.map(q => q.time_str),
+        datasets: [
+          // Nederst: Hushållskonsumtion
+          {
+            label: 'Hushållskonsumtion',
+            data: houseLoad,
+            borderColor: '#f87171',
+            backgroundColor: 'rgba(248, 113, 113, 0.35)',
+            borderWidth: 1.5,
+            fill: 'origin',
+            stepped: 'before',
+            ...noPointConfig
+          },
+          // Ovanpå: Batteriladdning
+          {
+            label: 'Batteriladdning',
+            data: chargeKw,
+            borderColor: '#c084fc',
+            backgroundColor: 'rgba(192, 132, 252, 0.45)',
+            borderWidth: 1.5,
+            fill: '-1',
+            stepped: 'before',
+            ...noPointConfig
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: sharedXAxis,
+          y: {
+            stacked: true,
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            ticks: { color: '#94a3b8' },
+            title: { display: true, text: 'kW', color: '#94a3b8' },
+            min: 0
+          }
+        },
+        plugins: {
+          legend: { labels: { color: '#f8fafc', font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              title: function(items) {
+                const q = quarters[items[0].dataIndex];
+                return q ? q.time_str + " (" + q.day_str + ")" : "";
+              }
+            }
+          }
+        }
+      }
+    });
+
+    // Chart 2: Producenter & Källor (Stacked Area)
+    new Chart(document.getElementById('producersChart'), {
+      type: 'line',
+      data: {
+        labels: quarters.map(q => q.time_str),
+        datasets: [
+          // Nederst: Nätimport
+          {
+            label: 'Nätimport',
+            data: gridImport,
+            borderColor: '#38bdf8',
+            backgroundColor: 'rgba(56, 189, 248, 0.45)',
+            borderWidth: 1.5,
+            fill: 'origin',
+            stepped: 'before',
+            ...noPointConfig
+          },
+          // Mellan: Solproduktion
+          {
+            label: 'Solproduktion',
+            data: pvKw,
+            borderColor: '#facc15',
+            backgroundColor: 'rgba(250, 204, 21, 0.55)',
+            borderWidth: 1.5,
+            fill: '-1',
+            stepped: 'before',
+            ...noPointConfig
+          },
+          // Toppen: Batteriurladdning
+          {
+            label: 'Batteriurladdning',
+            data: dischargeKw,
+            borderColor: '#34d399',
+            backgroundColor: 'rgba(52, 211, 153, 0.55)',
+            borderWidth: 1.5,
+            fill: '-1',
+            stepped: 'before',
+            ...noPointConfig
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: sharedXAxis,
+          y: {
+            stacked: true,
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            ticks: { color: '#94a3b8' },
+            title: { display: true, text: 'kW', color: '#94a3b8' },
+            min: 0
+          }
+        },
+        plugins: {
+          legend: { labels: { color: '#f8fafc', font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              title: function(items) {
+                const q = quarters[items[0].dataIndex];
+                return q ? q.time_str + " (" + q.day_str + ")" : "";
+              }
+            }
+          }
+        }
+      }
+    });
+
+    // Chart 2: SOC & Spotpris
+    new Chart(document.getElementById('socPriceChart'), {
+      type: 'line',
+      data: {
+        labels: quarters.map(q => q.time_str),
+        datasets: [
+          {
+            label: 'Batteri SOC (%)',
+            data: socPct,
+            borderColor: '#22c55e',
+            backgroundColor: 'rgba(34, 197, 94, 0.1)',
+            borderWidth: 2.2,
+            yAxisID: 'y_soc',
+            tension: 0.3,
+            fill: false,
+            ...noPointConfig
+          },
+          {
+            label: 'Spotpris Import (kr/kWh)',
+            data: priceIn,
+            borderColor: '#ef4444',
+            borderWidth: 1.8,
+            yAxisID: 'y_price',
+            stepped: 'before',
+            ...noPointConfig
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: sharedXAxis,
+          y_soc: {
+            type: 'linear',
+            position: 'left',
+            min: 0,
+            max: 100,
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            ticks: { color: '#22c55e' },
+            title: { display: true, text: 'SOC (%)', color: '#22c55e' }
+          },
+          y_price: {
+            type: 'linear',
+            position: 'right',
+            grid: { drawOnChartArea: false },
+            ticks: { color: '#ef4444' },
+            title: { display: true, text: 'kr / kWh', color: '#ef4444' }
+          }
+        },
+        plugins: {
+          legend: { labels: { color: '#f8fafc', font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              title: function(items) {
+                const q = quarters[items[0].dataIndex];
+                return q ? q.time_str + " (" + q.day_str + ")" : "";
+              }
+            }
+          }
+        }
+      }
+    });
+
+    // Tabell med aktiva kvartar
+    const tbody = document.getElementById("actions-table-body");
+    const activeQuarters = D.quarters.filter(q => q.charge_kw > 0.05 || q.discharge_kw > 0.05);
+    if (activeQuarters.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-muted); padding: 16px;">Ingen aktiv laddning eller urladdning planerad under perioden.</td></tr>';
+    } else {
+      tbody.innerHTML = activeQuarters.map(q => `
+        <tr>
+          <td><strong>${q.time_str}</strong></td>
+          <td>${q.charge_kw > 0.05 ? '<span class="tag-chg">Laddar</span>' : '<span class="tag-dis">Urladdar</span>'}</td>
+          <td><strong>${q.charge_kw > 0.05 ? q.charge_kw.toFixed(2) : q.discharge_kw.toFixed(2)} kW</strong></td>
+          <td>${q.grid_import_kw.toFixed(2)} kW</td>
+          <td>${q.soc_pct.toFixed(1)} % (${q.soc_kwh.toFixed(1)} kWh)</td>
+          <td>${q.price_in.toFixed(3)} kr</td>
+        </tr>
+      `).join('');
+    }
+  </script>
+</body>
+</html>

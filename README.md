@@ -11,6 +11,8 @@ Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall öv
 ### 1.1 Huvudfunktioner
 - **Spotprisarbitrage:** Laddar batteriet under lågprisperioder och urladdar under dyra timmar med hänsyn tagen till batteriets slitagekostnad och verkningsgrader vid laddning/urladdning ($\eta_{\text{chg}}=0.95, \eta_{\text{dis}}=0.95$).
 - **Effekttaxeminimering (Göteborg Energi):** Optimerar automatiskt mot nätägarens effekttariff (135 kr/kW·månad baserat på medelvärdet av månadens tre högsta timtoppar på olika helgfria vardagar kl 07:00–20:00 under perioden 1 november – 31 mars).
+  - **Dynamiskt effekttak ({\text{dag}}$):** Minimerar toppeffekten under högpristid genom att införa en dygnsoptimerad takvariabel {\text{dag}}$ med en skuggtaxa på 45 kr/kW (motsvarande 35/3$ kr/kW per månadstopp). Nödvändig nätimport smetas därmed ut helt platt över alla kvartar mellan 07:00 och 20:00.
+  - **Fri spotoptimering under taket:** Inom ramen för {\text{dag}}$ råder verkligt spotpris utan artificiella påslag, vilket ger frihet för spotarbitrage och optimal lastfördelning.
 - **Adaptiv last- och produktionsprognos:** Bygger en rullande prognos (upp till 48h horisont) för hushållets elbehov och solproduktion:
   - Solprognos via Solcast.
   - Värmebehovsmodellering kopplad mot SMHI:s temperaturprognos och husets värmepumpskoefficienter (NIBE BT1).
@@ -104,6 +106,11 @@ För att kombinera stabil produktion med kontinuerlig vidareutveckling tillämpa
 
 ## 5. Projektstatus & Historik
 
+- **2026-11-01 (v0.3.0 / Skarp Modbus-driftsättning & Dynamiskt effekttak):**
+  - **Skarp Modbus-styrning driftsatt:**  styr Solis hybridväxelriktare live via Home Assistant REST API (, strömbörvärden i Ampere,  som urladdningsspärr mot Self-Use). Verifierat skarpt med ~5.3 kW nätladdning.
+  - **Dynamiskt effekttak ({\text{dag}}$):** Ersatte stelt tvång på 100 % SOC kl 07:00 med ekonomiskt grundad LP-målfunktion (45 kr/kW på {\text{dag}}$ under vardagar 07:00–20:00 nov–mar). Tarifferar nätimport så att nattladdning före 07:00 sker naturligt och importen under dagen plattas ut helt.
+  - **Integrerad webb-dashboard:**  regenererar och synkar automatiskt webb-dashboarden till  efter varje kvartskörning.
+  - **Aktiv styrning påslagen:**  och .
 - **2026-10-31 (v0.2.1 / feature/smooth-charging):**
   - Mjuk och sammanhängande laddning med dygnsagnostisk formulering (löser 15-minuters fragmentering).
   - Utökade LP-modellen till 10 variabler per kvart med linjära rampningsvariabler ($R^+_t, R^-_t$).
