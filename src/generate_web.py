@@ -44,9 +44,15 @@ def fetch_and_compute():
     load_forecast = load_state["attributes"]["forecast_48h_kw"] if load_state else [0.0]*len(plan)
     pv_forecast = pv_state["attributes"]["forecast_48h_kw"] if pv_state else [0.0]*len(plan)
 
-    times = [datetime.datetime.fromisoformat(p["datetime"]) for p in plan]
+    # Säkerställ lokal svensk tid för prisuppslag (så att timme matchar Nord Pools lokaltid)
+    times = [datetime.datetime.fromisoformat(p["datetime"]).astimezone(TZ_STOCKHOLM) for p in plan]
     p_in, p_out, valid_times = opt.build_price_vector(client, times)
     client.close()
+
+    if len(p_in) < len(plan):
+        T = len(p_in)
+        plan = plan[:T]
+        times = times[:T]
 
     # Ekonomiska och tekniska beräkningar över planeringshorisonten
     cost_with_battery = 0.0

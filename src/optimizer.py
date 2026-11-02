@@ -40,6 +40,21 @@ def is_effekttariff_day(dt: datetime.datetime) -> bool:
         return False
     return True
 
+def get_p_dag_floor_kw(dt: datetime.datetime) -> float:
+    """
+    Säsongsgolv för effekttak P_dag (helgfria vardagar 07:00-20:00):
+    Undviker onödigt batterislitage på baslast under milda dagar.
+    - December och Januari (kallast, hög baslast): 1.6 kW
+    - November, Februari och Mars (mildare vinter): 1.3 kW
+    - Övriga månader (apr-okt): 0.0 kW
+    """
+    d = dt.date() if isinstance(dt, datetime.datetime) else dt
+    if d.month in [12, 1]:
+        return 1.6
+    elif d.month in [11, 2, 3]:
+        return 1.3
+    return 0.0
+
 HA_HOST = "10.12.22.12"
 HA_USER = "root"
 SSH_KEY = "/workspace/id_ed25519"
@@ -363,13 +378,13 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
             row_soc_upper[b_idx + 1] -= (1.0 / eta_dis)
             row_soc_lower[b_idx + 1] += (1.0 / eta_dis)
 
-        # SOC(k) <= 20.0 kWh
+        # SOC(k) <= 20.0 kWh (100%)
         A_ub.append(row_soc_upper)
         b_ub.append(20.0 - soc_now_kwh)
 
-        # SOC(k) >= 0.0 kWh
+        # SOC(k) >= 3.0 kWh (15% hälsogolv / reserv)
         A_ub.append(row_soc_lower)
-        b_ub.append(soc_now_kwh - 0.0)
+        b_ub.append(soc_now_kwh - 3.0)
 
         # Reservkrav under effekttariff-fönstret (07:00 - 19:00 helgfria vardagar nov-mar):
         dt_k = timestamps[k - 1]
@@ -401,8 +416,11 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
             A_ub.append(row_pdag)
             b_ub.append(0.0)
 
-    # Gränser: alla variabler >= 0
+    # Gränser: alla basvariabler >= 0. P_dag begränsas nedåt av säsongsgolvet.
     bounds = [(0, None) for _ in range(total_vars)]
+    for day_idx, d in enumerate(tariff_day_list):
+        p_floor = get_p_dag_floor_kw(d)
+        bounds[base_vars + day_idx] = (p_floor, None)
 
     res = scipy.optimize.linprog(
         c,
@@ -441,7 +459,7 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
         p_grid = sol[b_idx + 4]
 
         curr_soc += eta_chg * (g_batt + p_batt) - (1.0 / eta_dis) * (b_load + b_grid)
-        curr_soc = max(0.0, min(20.0, curr_soc))
+        curr_soc = max(3.0, min(20.0, curr_soc))
 
         p_charge_kw = (g_batt + p_batt) / 0.25
         p_discharge_kw = (b_load + b_grid) / 0.25

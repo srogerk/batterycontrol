@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import sys
 import datetime
+import zoneinfo
+TZ_STOCKHOLM = zoneinfo.ZoneInfo('Europe/Stockholm')
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -24,9 +26,16 @@ def generate_plan_chart(output_path="/workspace/projects/Batteristyrning - effek
     load_forecast = load_state["attributes"]["forecast_48h_kw"] if load_state else [0.0]*len(plan)
     pv_forecast = pv_state["attributes"]["forecast_48h_kw"] if pv_state else [0.0]*len(plan)
 
-    times = [datetime.datetime.fromisoformat(p["datetime"]) for p in plan]
+    # Säkerställ lokal svensk tid för prisuppslag
+    times = [datetime.datetime.fromisoformat(p["datetime"]).astimezone(TZ_STOCKHOLM) for p in plan]
     p_in, p_out, valid_times = opt.build_price_vector(client, times)
     client.close()
+
+    if len(p_in) < len(plan):
+        # Beskär till gemensam giltig horisont om prisdata tog slut
+        T = len(p_in)
+        plan = plan[:T]
+        times = times[:T]
 
     soc_pct = [p["soc_percent"] for p in plan]
     chg_kw = [p["charge_kw"] for p in plan]
