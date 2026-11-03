@@ -463,6 +463,8 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
         curr_soc = max(3.0, min(20.0, curr_soc))
 
         p_charge_kw = (g_batt + p_batt) / 0.25
+        grid_charge_kw = g_batt / 0.25
+        pv_charge_kw = p_batt / 0.25
         p_discharge_kw = (b_load + b_grid) / 0.25
         grid_import_kw = (g_load + g_batt) / 0.25
         grid_export_kw = (b_grid + p_grid) / 0.25
@@ -472,6 +474,8 @@ def optimize_48h(soc_now_kwh, load_forecast_kw, pv_forecast_kw, p_in, p_out, tim
             "soc_kwh": round(curr_soc, 2),
             "soc_percent": round((curr_soc / 20.0) * 100.0, 1),
             "charge_kw": round(p_charge_kw, 2),
+            "grid_charge_kw": round(grid_charge_kw, 2),
+            "pv_charge_kw": round(pv_charge_kw, 2),
             "discharge_kw": round(p_discharge_kw, 2),
             "grid_import_kw": round(grid_import_kw, 2),
             "grid_export_kw": round(grid_export_kw, 2)
@@ -558,11 +562,13 @@ def main():
         return
 
     print(f"Optimering löst på {elapsed:.3f} s! Status: {status}")
-    print(f"Första kvarten ({plan[0]['datetime']}):")
-    print(f"  Laddning:    {plan[0]['charge_kw']} kW")
-    print(f"  Urladdning:  {plan[0]['discharge_kw']} kW")
-    print(f"  Nätimport:   {plan[0]['grid_import_kw']} kW")
-    print(f"  Beräknad SOC: {plan[0]['soc_percent']}% ({plan[0]['soc_kwh']} kWh)")
+    q0_start = valid_timestamps[0].strftime("%H:%M")
+    q0_end = (valid_timestamps[0] + datetime.timedelta(minutes=15)).strftime("%H:%M")
+    print(f"Första kvarten ({q0_start} -> {q0_end}, {valid_timestamps[0].strftime('%Y-%m-%d')}):")
+    print(f"  Total laddning:   {plan[0]['charge_kw']} kW (varav nät: {plan[0]['grid_charge_kw']} kW, sol: {plan[0]['pv_charge_kw']} kW)")
+    print(f"  Urladdning:       {plan[0]['discharge_kw']} kW")
+    print(f"  Nätimport:        {plan[0]['grid_import_kw']} kW")
+    print(f"  Beräknad SOC:     {plan[0]['soc_percent']}% ({plan[0]['soc_kwh']} kWh)")
 
     # Sammanfattning av dygnet
     next_07 = [p for p in plan if "T07:00" in p["datetime"]]
@@ -576,6 +582,8 @@ def main():
         {
             "friendly_name": "Batteristyrning Optimeringsplan",
             "next_charge_kw": plan[0]["charge_kw"],
+            "next_grid_charge_kw": plan[0]["grid_charge_kw"],
+            "next_pv_charge_kw": plan[0]["pv_charge_kw"],
             "next_discharge_kw": plan[0]["discharge_kw"],
             "target_soc_percent": plan[0]["soc_percent"],
             "solve_time_seconds": round(elapsed, 3),

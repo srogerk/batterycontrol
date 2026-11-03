@@ -88,6 +88,8 @@ def main():
 
     plan_attrs = plan_state.get("attributes", {}) if plan_state else {}
     next_charge_kw = plan_attrs.get("next_charge_kw", 0.0)
+    next_grid_charge_kw = plan_attrs.get("next_grid_charge_kw", next_charge_kw)
+    next_pv_charge_kw = plan_attrs.get("next_pv_charge_kw", 0.0)
     next_discharge_kw = plan_attrs.get("next_discharge_kw", 0.0)
     target_soc = plan_attrs.get("target_soc_percent", 0.0)
 
@@ -105,12 +107,14 @@ def main():
         if grid_meter_state:
             log(f"[RÄDDA TIMMEN] Aktiv timvakt: klockan är {now_local.strftime('%H:%M')}, nätmätarställning: {grid_meter_state.get('state')} kWh")
 
-    # Beräkna nödvändig laddström (A) för att smeta ut laddningen över hela 15-minuterskvarten
+    # Beräkna nödvändig laddström (A) från nätet för att smeta ut laddningen över hela 15-minuterskvarten
+    # OBS: Endast planerad nätladdning (next_grid_charge_kw) ska styra TOU Slot 1!
+    # Solöverskott (next_pv_charge_kw) hanteras automatiskt av Solis i Self-Use-läge.
     # I (A) = P (W) / U (V)
-    # Begränsa målad laddeffekt till max 10.0 kW
-    effective_charge_kw = min(10.0, next_charge_kw)
-    if effective_charge_kw > 0.05:
-        target_charge_amps = round((effective_charge_kw * 1000.0) / battery_voltage, 1)
+    # Begränsa målad nätladdeffekt till max 10.0 kW
+    effective_grid_charge_kw = min(10.0, next_grid_charge_kw)
+    if effective_grid_charge_kw > 0.05:
+        target_charge_amps = round((effective_grid_charge_kw * 1000.0) / battery_voltage, 1)
         # Säkerställ att strömmen håller sig inom rimliga gränser (min 1.0 A, max 40.0 A / ~10 kW)
         target_charge_amps = max(1.0, min(40.0, target_charge_amps))
     else:
@@ -132,7 +136,7 @@ def main():
         # Nattetid utanför tariff vid laddning/vänteläge: lås vid nuvarande SOC
         target_backup_soc = int(min(100, max(15, round(current_soc))))
 
-    log(f"Optimerat börvärde för kommande kvart: Ladda={next_charge_kw:.2f} kW ({target_charge_amps} A vid {battery_voltage:.1f} V), Urladda={next_discharge_kw:.2f} kW, Target Backup SOC={target_backup_soc}%, Mål-SOC={target_soc:.1f}%")
+    log(f"Optimerat börvärde för kommande kvart: Ladda={next_charge_kw:.2f} kW (Nät={next_grid_charge_kw:.2f} kW -> {target_charge_amps} A vid {battery_voltage:.1f} V, Sol={next_pv_charge_kw:.2f} kW), Urladda={next_discharge_kw:.2f} kW, Target Backup SOC={target_backup_soc}%, Mål-SOC={target_soc:.1f}%")
 
     if not is_active:
         status_text = "Inaktiv (batterycontrol_active = off)"
@@ -140,7 +144,7 @@ def main():
     elif is_dry_run:
         status_text = "Skuggläge / Dry Run"
         log(f"Styrning: {status_text}.")
-        log(f"[DRY RUN SIMULERING] Skulle ha skickat: TOU Slot 1 Ström={target_charge_amps} A ({next_charge_kw:.2f} kW), Urladda={next_discharge_kw:.2f} kW, Backup SOC={target_backup_soc}% (nuvarande: {current_backup_soc}%)")
+        log(f"[DRY RUN SIMULERING] Skulle ha skickat: TOU Slot 1 Ström={target_charge_amps} A (Nätladdning: {next_grid_charge_kw:.2f} kW, Total laddning: {next_charge_kw:.2f} kW), Urladda={next_discharge_kw:.2f} kW, Backup SOC={target_backup_soc}% (nuvarande: {current_backup_soc}%)")
     else:
         status_text = "Aktiv styrning (Live Modbus)"
         log(f"Styrning: {status_text}.")
@@ -151,9 +155,9 @@ def main():
 
         # TOU Slot 1 Nätladdning:
         # Om optimeraren vill ladda från nätet i kommande kvart:
-        # Hitta hur länge laddblocket pågår i planen (sammanhängande kvartar med laddning)
+        # Hitta hur länge nätladdblocket pågår i planen (sammanhängande kvartar med nätladdning)
         plan_48h = plan_attrs.get("plan_48h", [])
-        if next_charge_kw > 0.05:
+        if next_grid_charge_kw > 0.05:
             # Beräkna blockets sluttid
             import zoneinfo
             sthlm_tz = zoneinfo.ZoneInfo("Europe/Stockholm")
@@ -163,10 +167,10 @@ def main():
             start_minute = (now_dt.minute // 15) * 15
             start_str = f"{now_dt.hour:02d}:{start_minute:02d}:00"
             
-            # Hitta hur många sammanhängande kvartar laddningen varar från och med kvart 0
+            # Hitta hur många sammanhängande kvartar nätladdningen varar från och med kvart 0
             charge_consecutive_quarters = 0
             for p in plan_48h:
-                if p.get("charge_kw", 0.0) > 0.05:
+                if p.get("grid_charge_kw", p.get("charge_kw", 0.0)) > 0.05:
                     charge_consecutive_quarters += 1
                 else:
                     break
@@ -176,7 +180,7 @@ def main():
             end_dt = now_dt.replace(minute=start_minute, second=0, microsecond=0) + datetime.timedelta(minutes=15 * charge_consecutive_quarters)
             end_str = f"{end_dt.hour:02d}:{end_dt.minute:02d}:00"
 
-            log(f"[LIVE MODBUS] Aktiverar TOU Slot 1 laddning: {start_str} -> {end_str}, Ström={target_charge_amps} A ({next_charge_kw:.2f} kW), Cut-off SOC=100%")
+            log(f"[LIVE MODBUS] Aktiverar TOU Slot 1 laddning: {start_str} -> {end_str}, Ström={target_charge_amps} A ({next_grid_charge_kw:.2f} kW nät), Cut-off SOC=100%")
             client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_grid_time_of_use_charge_cut_off_soc_slot_1", "value": 100})
             client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1", "value": target_charge_amps})
             client.call_service("time", "set_value", {"entity_id": "time.solis_s6_eh1p_grid_time_of_use_charge_start_slot_1", "time": start_str})
@@ -190,7 +194,7 @@ def main():
                 client.call_service("switch", "turn_off", {"entity_id": "switch.grid_time_of_use_charging_period_1"})
             client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1", "value": 0.0})
 
-        log(f"[LIVE MODBUS] Tillämpat: TOU Slot 1 Ström={target_charge_amps} A ({next_charge_kw:.2f} kW), Urladda={next_discharge_kw:.2f} kW, Backup SOC={target_backup_soc}%")
+        log(f"[LIVE MODBUS] Tillämpat: TOU Slot 1 Ström={target_charge_amps} A (Nät={next_grid_charge_kw:.2f} kW), Urladda={next_discharge_kw:.2f} kW, Backup SOC={target_backup_soc}%")
 
         # Styrning av elbilsladdning (Charge Amps) baserat på 10 kWh-ordern
         ev_order_active = plan_attrs.get("ev_charge_order_active", False)
@@ -217,6 +221,8 @@ def main():
             "dry_run": is_dry_run,
             "last_run": datetime.datetime.now().isoformat(),
             "next_charge_kw": next_charge_kw,
+            "next_grid_charge_kw": next_grid_charge_kw,
+            "next_pv_charge_kw": next_pv_charge_kw,
             "next_charge_amps": target_charge_amps,
             "battery_voltage": battery_voltage,
             "next_discharge_kw": next_discharge_kw,
