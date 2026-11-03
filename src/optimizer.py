@@ -17,6 +17,7 @@ import os
 import json
 import time
 import datetime
+import zoneinfo
 import holidays
 import hmac
 import hashlib
@@ -498,7 +499,8 @@ def main():
     load_forecast = load_state["attributes"]["forecast_48h_kw"]
     pv_forecast = pv_state["attributes"]["forecast_48h_kw"]
 
-    now = datetime.datetime.now().astimezone()
+    tz_local = zoneinfo.ZoneInfo("Europe/Stockholm")
+    now = datetime.datetime.now(tz_local)
     minute = (now.minute // 15) * 15
     base = now.replace(minute=minute, second=0, microsecond=0)
     timestamps = [base + datetime.timedelta(minutes=15 * i) for i in range(192)]
@@ -515,6 +517,38 @@ def main():
     prev_charge_kw = 0.0
     if plan_now_state and "next_charge_kw" in plan_now_state.get("attributes", {}):
         prev_charge_kw = float(plan_now_state["attributes"].get("next_charge_kw", 0.0))
+
+    # Kontrollera om elbilsladdning beställts (input_boolean.ev_charge_order_10kwh)
+    ev_order_state = client.get_state("input_boolean.ev_charge_order_10kwh")
+    ev_order_active = (ev_order_state and ev_order_state.get("state") == "on")
+
+    ev_plan_quarters = []
+    if ev_order_active:
+        # Hitta billigaste sammanhängande 2-timmarsfönstret (8 kvartar) innan nästa kl 07:00
+        eligible_indices = []
+        for i, dt_i in enumerate(valid_timestamps):
+            if dt_i.hour == 7 and dt_i.minute == 0:
+                break
+            eligible_indices.append(i)
+
+        best_cost = float("inf")
+        best_start = -1
+        if len(eligible_indices) >= 8:
+            for s in range(len(eligible_indices) - 7):
+                cost = sum(p_in[s + k] for k in range(8))
+                if cost < best_cost:
+                    best_cost = cost
+                    best_start = s
+            if best_start != -1:
+                ev_plan_quarters = list(range(best_start, best_start + 8))
+                print(f"Elbilsorder (10 kWh): Planerar sammanhängande laddning kl {valid_timestamps[best_start].strftime('%H:%M')} - {valid_timestamps[best_start+8].strftime('%H:%M')}")
+                for q_idx in ev_plan_quarters:
+                    load_f[q_idx] = float(load_f[q_idx]) + 5.5
+        elif eligible_indices:
+            print("Elbilsorder: Färre än 8 kvartar kvar till kl 07:00. Laddar resterande kvartar fram till 07:00.")
+            ev_plan_quarters = eligible_indices
+            for q_idx in ev_plan_quarters:
+                load_f[q_idx] = float(load_f[q_idx]) + 5.5
 
     plan, status, optimal_p_dag = optimize_48h(soc_kwh, load_f, pv_f, p_in, p_out, valid_timestamps, prev_charge_kw=prev_charge_kw)
     elapsed = time.time() - t0
@@ -546,6 +580,9 @@ def main():
             "target_soc_percent": plan[0]["soc_percent"],
             "solve_time_seconds": round(elapsed, 3),
             "optimal_p_dag": optimal_p_dag,
+            "ev_charge_order_active": ev_order_active,
+            "ev_charge_now": (0 in ev_plan_quarters),
+            "ev_plan_quarters": [valid_timestamps[q].strftime("%Y-%m-%dT%H:%M") for q in ev_plan_quarters],
             "plan_48h": plan
         }
     )

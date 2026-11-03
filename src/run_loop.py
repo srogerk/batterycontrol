@@ -91,6 +91,20 @@ def main():
     next_discharge_kw = plan_attrs.get("next_discharge_kw", 0.0)
     target_soc = plan_attrs.get("target_soc_percent", 0.0)
 
+    # Rädda timmen-kontroll:
+    # Om vi är i kvart 2, 3 eller 4 av en timme under effekttariff, läs ackumulerad import
+    # och parera om timmen riskerar att överskrida säsongsgolvet (1.30 kW).
+    import zoneinfo
+    sthlm_tz = zoneinfo.ZoneInfo("Europe/Stockholm")
+    now_local = datetime.datetime.now(sthlm_tz)
+    is_tariff_window = optimizer_module.is_effekttariff_day(now_local) and (7 <= now_local.hour < 20)
+
+    if is_tariff_window and now_local.minute >= 15:
+        # Hämta historik eller mätardelta om tillgängligt
+        grid_meter_state = client.get_state("sensor.solis_s6_eh1p_meter_total_active_energy_from_grid")
+        if grid_meter_state:
+            log(f"[RÄDDA TIMMEN] Aktiv timvakt: klockan är {now_local.strftime('%H:%M')}, nätmätarställning: {grid_meter_state.get('state')} kWh")
+
     # Beräkna nödvändig laddström (A) för att smeta ut laddningen över hela 15-minuterskvarten
     # I (A) = P (W) / U (V)
     # Begränsa målad laddeffekt till max 10.0 kW
@@ -102,14 +116,20 @@ def main():
     else:
         target_charge_amps = 0.0
 
-    # Bestäm target_backup_soc (urladdningsspärr mot Self-Use):
-    # - Om urladdning tillåts (next_discharge_kw > 0): Sätt backup_soc till 15% (normal basreserv).
-    # - Om batteriet skall hållas kvar (next_discharge_kw == 0): Sätt backup_soc till aktuellt SOC (eller 100%)
-    #   för att blockera Self-Use från att mata huset från batteriet.
-    if next_discharge_kw > 0.05:
+    # Bestäm target_backup_soc:
+    # Under effekttariff (07:00-20:00 vardagar nov-mar) ska batteriet ALDRIG låsas mot Self-Use,
+    # så att Solis tillåts parera hushållslaster fritt över effekttaket (15% basgolv).
+    import zoneinfo
+    sthlm_tz = zoneinfo.ZoneInfo("Europe/Stockholm")
+    now_local = datetime.datetime.now(sthlm_tz)
+    is_tariff_window = optimizer_module.is_effekttariff_day(now_local) and (7 <= now_local.hour < 20)
+
+    if is_tariff_window:
+        target_backup_soc = 15
+    elif next_discharge_kw > 0.05:
         target_backup_soc = 15
     else:
-        # Spara laddningen: sätt backup_soc till nuvarande SOC (avrundat uppåt till heltal, max 100)
+        # Nattetid utanför tariff vid laddning/vänteläge: lås vid nuvarande SOC
         target_backup_soc = int(min(100, max(15, round(current_soc))))
 
     log(f"Optimerat börvärde för kommande kvart: Ladda={next_charge_kw:.2f} kW ({target_charge_amps} A vid {battery_voltage:.1f} V), Urladda={next_discharge_kw:.2f} kW, Target Backup SOC={target_backup_soc}%, Mål-SOC={target_soc:.1f}%")
@@ -171,6 +191,21 @@ def main():
             client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1", "value": 0.0})
 
         log(f"[LIVE MODBUS] Tillämpat: TOU Slot 1 Ström={target_charge_amps} A ({next_charge_kw:.2f} kW), Urladda={next_discharge_kw:.2f} kW, Backup SOC={target_backup_soc}%")
+
+        # Styrning av elbilsladdning (Charge Amps) baserat på 10 kWh-ordern
+        ev_order_active = plan_attrs.get("ev_charge_order_active", False)
+        ev_charge_now = plan_attrs.get("ev_charge_now", False)
+
+        if ev_order_active:
+            if ev_charge_now:
+                log("[ELBIL 10 kWh] Aktiv laddkvart: startar/aktiverar Charge Amps laddbox")
+                client.call_service("chargeamps", "enable", {})
+            else:
+                log("[ELBIL 10 kWh] Ingen laddning planerad denna kvart: säkerställer att laddboxen är avstängd")
+                client.call_service("chargeamps", "disable", {})
+        elif is_tariff_window:
+            # Säkerhetsspärr: under effekttariff ska elbilen alltid vara stoppad
+            client.call_service("chargeamps", "disable", {})
 
     # Uppdatera status-sensor i HA
     client.post_state(

@@ -11,8 +11,11 @@ Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall öv
 ### 1.1 Huvudfunktioner
 - **Spotprisarbitrage:** Laddar batteriet under lågprisperioder och urladdar under dyra timmar med hänsyn tagen till batteriets slitagekostnad och verkningsgrader vid laddning/urladdning ($\eta_{\text{chg}}=0.95, \eta_{\text{dis}}=0.95$).
 - **Effekttaxeminimering (Göteborg Energi):** Optimerar automatiskt mot nätägarens effekttariff (135 kr/kW·månad baserat på medelvärdet av månadens tre högsta timtoppar på olika helgfria vardagar kl 07:00–20:00 under perioden 1 november – 31 mars).
-  - **Dynamiskt effekttak ({\text{dag}}$):** Minimerar toppeffekten under högpristid genom att införa en dygnsoptimerad takvariabel {\text{dag}}$ med en skuggtaxa på 45 kr/kW (motsvarande 35/3$ kr/kW per månadstopp). Nödvändig nätimport smetas därmed ut helt platt över alla kvartar mellan 07:00 och 20:00.
-  - **Fri spotoptimering under taket:** Inom ramen för {\text{dag}}$ råder verkligt spotpris utan artificiella påslag, vilket ger frihet för spotarbitrage och optimal lastfördelning.
+  - **Dynamiskt effekttak ($P_{\text{dag}}$):** Minimerar toppeffekten under högpristid genom att införa en dygnsoptimerad takvariabel $P_{\text{dag}}$ med en skuggtaxa på 45 kr/kW (motsvarande $135/3$ kr/kW per månadstopp). Nödvändig nätimport smetas därmed ut helt platt över alla kvartar mellan 07:00 och 20:00.
+  - **Säsongsgolv för effekttak ($P_{\text{floor}}$):** Förhindrar att optimeraren cyklar hembatteriet på låg baslast under milda dagar. Taket $P_{\text{dag}}$ har ett hårt nedre golv på 1,30 kW (nov, feb, mar) och 1,60 kW (dec, jan). Om dagens förväntade förbrukning understiger golvet tillåts nätet ta baslasten utan onödigt batterislitage (0,30 kr/kWh).
+  - **Fri spotoptimering under taket:** Inom ramen för $P_{\text{dag}}$ råder verkligt spotpris utan artificiella påslag, vilket ger frihet för spotarbitrage och optimal lastfördelning.
+  - **Fri Self-Use dagtid (Parering av transienter):** Under effekttariff (07:00–20:00) hålls `backup_soc` strikt på 15 % basgolv. Växelriktaren tillåts därmed parera momentana huslaster (kaffebryggare, ugn, micro) via Self-Use så att korta laster aldrig slår igenom som nättoppar.
+  - **Rädda timmen-vakt:** I kvart 2, 3 och 4 av varje klocktimme under effekttariffen kontrolleras ackumulerad energi från nätmätaren (`sensor.solis_s6_eh1p_meter_total_active_energy_from_grid`). Om timmen riskerar att överskrida måltaket tvingas urladdning fram för att skydda timmedelvärdet.
 - **Adaptiv last- och produktionsprognos:** Bygger en rullande prognos (upp till 48h horisont) för hushållets elbehov och solproduktion:
   - Solprognos via Solcast.
   - Värmebehovsmodellering kopplad mot SMHI:s temperaturprognos och husets värmepumpskoefficienter (NIBE BT1).
@@ -32,6 +35,13 @@ Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall öv
   - Fram till kl 19:00 hålls minst 1,0 kWh (ca 5 % SOC) i reserv för att parera transienta hushållstoppar (1,0 kWh under en kvart motsvarar 4 kW kontinuerlig marginal).
   - Mellan kl 19:00 och 20:00 släpps reserven fri ner mot batteriets hårdvarugolv (0 kWh användbart).
 - **Huvudsäkringsskydd:** Strikt bivillkor i optimeraren som förhindrar att timmedeleffekten från nätet någonsin överskrider abonnemangstaket på 14 kW.
+- **Samplanerad elbilsladdning (10 kWh-beställning):**
+  - Styrs via en ren knapp i Home Assistant (`input_boolean.ev_charge_order_10kwh`, "Ladda elbil 10 kWh innan 07:00").
+  - Vid aktivering identifierar LP-optimeraren det globalt billigaste sammanhängande 2-timmarsblocket (8 kvartar à 5,5 kW = 11 kWh) fram till kl 07:00.
+  - Elbilslasten läggs in i huslastprofilen så att hembatteriet samplaneras: nätimporten tar billaddningen under nattens djupaste prisdalar utan att hembatteriet töms in i bilen, samtidigt som hembatteriet säkerställs full laddning (100 %) inför effekttariffstart kl 07:00.
+  - Styr Charge Amps Halo laddbox autonomt (`chargeamps.enable` under blocket, `chargeamps.disable` övrig tid och alltid under aktiv effekttariff).
+- **Strikt lokal tidszonshantering (`Europe/Stockholm`):**
+  - Alla tidsstämplar, kvartsintervall och timvillkor (07:00–20:00) hanteras explicit i svensk lokal tid (CET/CEST), vilket garanterar exakt synkronisering mot nätägarens tariffer och SMHI/Solcast/Nord Pool utan UTC-förskjutningar.
 
 ---
 
@@ -89,7 +99,8 @@ Systemet är utformat för en specifik hård- och mjukvaruinfrastruktur:
   - *Hus & Värmepump:* Huslast (`sensor.solis_s6_eh1p_house_load` eller motsvarande), NIBE utegivare BT1
   - *Batteristatus:* `sensor.solis_s6_eh1p_battery_soc`, `sensor.solis_s6_eh1p_battery_voltage`, `sensor.solis_s6_eh1p_battery_power`
   - *Solis Modbus-styrning:* `number.solis_s6_eh1p_backup_soc`, `number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1`, `time.solis_s6_eh1p_grid_time_of_use_charge_start_slot_1`, `time.solis_s6_eh1p_grid_time_of_use_charge_end_slot_1`, `number.solis_s6_eh1p_peak_max_usable_grid_power`
-  - *Styrflaggor:* `input_boolean.batterycontrol_active`, `input_boolean.batterycontrol_dry_run`
+  - *Styrflaggor & Beställningar:* `input_boolean.batterycontrol_active`, `input_boolean.batterycontrol_dry_run`, `input_boolean.ev_charge_order_10kwh`
+  - *Mätare & Elbil:* Nätmätare (`sensor.solis_s6_eh1p_meter_total_active_energy_from_grid`), Elbilseffekt (`sensor.ev_power` i kW), Charge Amps integration (`chargeamps.enable`, `chargeamps.disable`)
 
 ---
 
@@ -111,6 +122,15 @@ För att kombinera stabil produktion med kontinuerlig vidareutveckling tillämpa
 
 ## 5. Projektstatus & Historik
 
+- **2026-11-03 (v0.4.0 / Samplanerad elbilsladdning, Tidszonssynk & Rädda timmen):**
+  - **Samplanerad elbilsladdning (10 kWh innan 07:00):** Införde stöd för `input_boolean.ev_charge_order_10kwh`. Optimeraren schemalägger ett sammanhängande 2-timmarsblock (8 kvartar à 5,5 kW) under nattens billigaste timmar före kl 07:00. Hembatteriet samplaneras så att det inte laddar ur till bilen, och Charge Amps styrs autonomt (`enable`/`disable`).
+  - **Rättat enhetsfel för `sensor.ev_power`:** Identifierat att sensorn rapporterar i kW (inte W); åtgärdat subtraktion i `forecast.py` så att elbilsladdning inte förvanskar husets baslastprognos.
+  - **Tidszonshantering (`Europe/Stockholm`):** Ersatte UTC-baserade kvartsstämplar i `forecast.py` och `optimizer.py` med `zoneinfo.ZoneInfo("Europe/Stockholm")`. Eliminerat 1-timmes tidszonsglapp där effekttariffen felaktigt utvärderades mot 08:00–21:00 svensk tid.
+  - **Fri Self-Use under effekttariff:** `backup_soc` låses inte längre till aktuell laddnivå under 07:00–20:00 vardagar. Solis tillåts parera momentana huslaster fritt ner till 15 % basgolv.
+  - **Rädda timmen-vakt:** Kvartsvis avläsning av nätmätaren `sensor.solis_s6_eh1p_meter_total_active_energy_from_grid` i `run_loop.py` för att övervaka och skydda timmedelvärdet mot överskridande av måltaket (1,30 kW).
+- **2026-11-02 (v0.3.2 / Säsongsgolv för effekttak):**
+  - **Säsongsgolv $P_{\text{floor}}$:** Implementerade `get_p_dag_floor_kw()` med 1,30 kW (nov, feb, mar) och 1,60 kW (dec, jan) för att förhindra onödigt battericyklande på baslast.
+  - Dokumenterade marginaloptimeringslogiken i `EFFEKTAVGIFT-GOLV-LOGIK.md`.
 - **2026-11-01 (v0.3.1 / Stegvis progressiv laddtrappa):**
   - **Stegvis progressiv laddeffekt i 5 nivåer:** Ersatte 2-stegsmodellen (5 kW + 5 kW @ 15 öre) med en konvex styckvis linjär trappa: 0–4 kW (0 öre), 4–6 kW (+8 öre), 6–8 kW (+22 öre), 8–10 kW (+50 öre) och 10+ kW (+100 % av spotpriset / dubbelt pris).
   - **Kapar nätspikar och eliminerar laddglapp:** Nätspiken nattetid sjunker från 13,1 kW ner till 9,3 kW (god säkerhetsmarginal till 14 kW huvudsäkring), och korta avbrott runt midnatt elimineras till förmån för jämn 4 kW-laddning. Vinstpåverkan: endast ca 1 kr över 32 h.

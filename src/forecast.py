@@ -9,6 +9,7 @@ import os
 import json
 import time
 import datetime
+import zoneinfo
 import hmac
 import hashlib
 import base64
@@ -151,8 +152,9 @@ def main():
     outdoor_temp_state = client.get_state("sensor.aktuell_utetemperatur_bt1_40004")
 
     actual_load_w = float(actual_load_state.get("state", 1500)) if actual_load_state else 1500.0
-    ev_power_w = float(ev_power_state.get("state", 0)) if (ev_power_state and ev_power_state.get("state") not in ["unknown", "unavailable"]) else 0.0
-    net_house_load_kw = max(0.1, (actual_load_w - ev_power_w) / 1000.0)
+    # sensor.ev_power is in kW
+    ev_power_kw = float(ev_power_state.get("state", 0)) if (ev_power_state and ev_power_state.get("state") not in ["unknown", "unavailable"]) else 0.0
+    net_house_load_kw = max(0.1, (actual_load_w / 1000.0) - ev_power_kw)
 
     outdoor_temp = float(outdoor_temp_state.get("state", 10.0)) if outdoor_temp_state else 10.0
 
@@ -170,22 +172,23 @@ def main():
     solcast_raw = client.read_solcast_json()
     smhi_hourly = client.get_weather_forecast()
 
-    # Bygg temperaturlookup per timme från SMHI
+    # Bygg temperaturlookup per timme från SMHI i lokal svensk tid
+    tz_local = zoneinfo.ZoneInfo("Europe/Stockholm")
     temp_by_hour = {}
     for item in smhi_hourly:
         dt_str = item["datetime"]
-        dt = datetime.datetime.fromisoformat(dt_str)
+        dt = datetime.datetime.fromisoformat(dt_str).astimezone(tz_local)
         temp_by_hour[dt.strftime("%Y-%m-%d %H")] = float(item["temperature"])
 
-    # Bygg Solcast lookup per halvtimme
+    # Bygg Solcast lookup per halvtimme i lokal svensk tid
     solcast_by_period = {}
     for item in solcast_raw:
         dt_str = item["period_start"]
-        dt = datetime.datetime.fromisoformat(dt_str)
+        dt = datetime.datetime.fromisoformat(dt_str).astimezone(tz_local)
         solcast_by_period[dt.strftime("%Y-%m-%d %H:%M")] = float(item["pv_estimate"])
 
-    # 4. Skapa 192 kvartar (48 h)
-    now = datetime.datetime.now(datetime.timezone.utc)
+    # 4. Skapa 192 kvartar (48 h) i lokal svensk tid
+    now = datetime.datetime.now(tz_local)
     quarters = generate_15m_timestamps(now, steps=192)
 
     load_forecast_kw = []
