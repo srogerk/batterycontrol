@@ -2,7 +2,7 @@
 
 ## 1. Bakgrund och problemformulering
 
-Vid Göteborg Energis tidsindelade effekttariff (högprishelgfria vardagar kl 07:00–20:00 under november–mars) debiteras 135 kr/kW baserat på medelvärdet av månadens tre högsta timtoppar under debiteringsfönstret.
+Vid Göteborg Energis tidsindelade effekttariff (högprishelgfria vardagar kl 07:00–20:00 under november–mars) debiteras 135 kr/kW baserat på medelvärdet av månadens tre högsta timtoppar på olika dagar under debiteringsfönstret.
 
 I en rullande MPC-optimering med 48-timmars horisont uppstår ett allvarligt problem:
 - Optimeraren ser inte hela månaden framåt.
@@ -26,6 +26,13 @@ En simulering över 2025 års timdata (`el_2025_tim.csv`) där effekttaket svept
 | **December, Januari** | Kall vinter, hög värmelast | ~1,50 kW | **1,60 kW** | Kurvan är flack; skillnaden mot teoretiskt minimum är < 2 kr/mån. 1,60 kW sparar battericykler och ger marginal mot prognosfel. |
 | **November, Februari, Mars** | Mild vinter, måttlig last | ~1,25 kW | **1,30 kW** | Kostnadsökning mot optimum är endast +2 kr/mån. Skyddar batteriet från att tömmas på milda dagar. |
 | **April–Oktober** | Lågprissäsong (0 kr/kW) | 0,00 kW | **0,00 kW** | Ingen effekttariff debiteras. |
+
+
+## 4. Formulering av optimerarens logik
+
+Det finns ett säsongsgolv som är fast per månad och motsvarar det förväntade medelvärdet av de 3 högsta effektopparna under månaden.
+Säsongsgolvet avser det lägsta effekttaket, inget annat.
+- Effektstyrningen skall sträva efter att inte förbruka mer energi än max(Pgolv,Pmax-so-far-today,P-max3-månad) * 1h under 1 och samma timma (Ex 7.00-8.00). Notera att det innebär att optimeringen måste ta hänsyn till "energi-skuld eller -överskott" som finns vid x.15, x.30 x.45 och anpassa styrningen så att innevarande timme följer optimeringsmålet. Vi har kallar denna del av styrningen för "rädda timmen". Optimeraren fördelar ingående underskott eller överskott på de kvarvarande kvartarna av timmmen som en del av den vanliga optimeringen, kompenseringen av överskottet/underskåttet blir en ändring av effektbehovet. 
 
 ## 4. Implementering i LP-optimeraren
 

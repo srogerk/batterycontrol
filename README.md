@@ -122,6 +122,15 @@ För att kombinera stabil produktion med kontinuerlig vidareutveckling tillämpa
 
 ## 5. Projektstatus & Historik
 
+- **2026-11-08 (v0.5.0 / Optimizer v2 – HiGHS LP, 25 kWh, Mjuk laddning, Ren nät-EV & Effekttariff):**
+  - **Optimizer v2 med HiGHS LP (`optimizer_v2.py`):** Komplett ny optimeringsmotor baserad på `scipy.optimize.linprog` (HiGHS) med dynamisk horisont (upp till 36+ h beroende på Nord Pool morgondagspriser). Löser hela problemet på under 0,1 sekund.
+  - **Uppdaterad batterikapacitet (25 kWh nominell):** Konfigurerad för 25 kWh nominell kapacitet med 85 % användbart fönster (15 % – 100 %, d.v.s. 3,75 kWh till 25,00 kWh).
+  - **Ingen batteriexport ($E_{\text{batt}\to\text{grid}} = 0$):** Batteriet täcker enbart husets egenförbrukning (Self-Use) och säljer aldrig energi ut på nätet.
+  - **Effekttariff 1 nov – 31 mars (07:00–20:00 vardagar):** Optimerar strikt mot effekttaxan med säsongsgolv $P_{\text{tak}} = 1,30\text{ kW}$ (nov, feb, mar) och $1,60\text{ kW}$ (dec, jan), kombinerat med historiska toppar ($P_3$). Straffavgift 45 kr/kW per toppdag.
+  - **Mjuk/progressiv laddning:** Styckvis linjär konvex approximation av laddkostnaden med 0,04 kr/kW i 5 nivåer (0–2, 2–4, 4–6, 6–8, 8–10 kW) kombinerat med växlingsdämpning mellan intilliggande kvartar. Hindrar ryckiga laddspikar och smetar ut nattladdningen jämnt.
+  - **Elbilsladdning som ren nätimport (22:00–07:00):** 3 sammanhängande timmar à 5,5 kW allokeras automatiskt under nattens billigaste timmar utanför effekttariffen. Bilen laddas till 100 % från nätet utan att dränera hembatteriet ($P_{\text{batt}\to\text{load}} = 0$ under laddblocket).
+  - **Korrigerat terminalvärde:** Både nätladdning och urladdning balanserar symmetriskt mot terminalvärdet $V(\text{SOC}_T) = v_{\text{term}} \cdot \text{SOC}_T$, vilket garanterar att batteriet fylls på vid prisdalar inför dyra timmar.
+  - **Driftsättning och bakåtkompatibilitet:** `src/run_loop.py` uppdaterad till Optimizer v2. Tidigare v1 sparad som `src/run_loop_v1.py` för snabb återgång vid behov.
 - **2026-11-03 (v0.4.0 / Samplanerad elbilsladdning, Tidszonssynk & Rädda timmen):**
   - **Samplanerad elbilsladdning (10 kWh innan 07:00):** Införde stöd för `input_boolean.ev_charge_order_10kwh`. Optimeraren schemalägger ett sammanhängande 2-timmarsblock (8 kvartar à 5,5 kW) under nattens billigaste timmar före kl 07:00. Hembatteriet samplaneras så att det inte laddar ur till bilen, och Charge Amps styrs autonomt (`enable`/`disable`).
   - **Rättat enhetsfel för `sensor.ev_power`:** Identifierat att sensorn rapporterar i kW (inte W); åtgärdat subtraktion i `forecast.py` så att elbilsladdning inte förvanskar husets baslastprognos.
