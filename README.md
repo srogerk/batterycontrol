@@ -122,6 +122,10 @@ För att kombinera stabil produktion med kontinuerlig vidareutveckling tillämpa
 
 ## 5. Projektstatus & Historik
 
+- **2026-11-09 (v0.5.1 / Justerat terminalvärde mot nattpris vid horisontslut):**
+  - **Reviderat terminalvärde i `optimizer_v2.py`:** Ersatte dygnsmedelvärdet (`mean(p_in)`) med sista kända kvartens elpris vid midnatt (`p_in[-1]`). 
+  - **Eliminerat artificiell övervärdering:** Förhindrar att batteriet sparar energi mot dyr dagel eller tvingas panikladda mot 100 % före midnatt.
+  - **Fullt batteriutnyttjande och mjuk landning:** Batteriet täcker hushållslasten fullt ut dagtid (nätimport minimeras), landar mjukt på 15 % basreserv kl 21:00 och håller sig lugnt utan stressladdning fram till nattens lägsta spotpriser.
 - **2026-11-08 (v0.5.0 / Optimizer v2 – HiGHS LP, 25 kWh, Mjuk laddning, Ren nät-EV & Effekttariff):**
   - **Optimizer v2 med HiGHS LP (`optimizer_v2.py`):** Komplett ny optimeringsmotor baserad på `scipy.optimize.linprog` (HiGHS) med dynamisk horisont (upp till 36+ h beroende på Nord Pool morgondagspriser). Löser hela problemet på under 0,1 sekund.
   - **Uppdaterad batterikapacitet (25 kWh nominell):** Konfigurerad för 25 kWh nominell kapacitet med 85 % användbart fönster (15 % – 100 %, d.v.s. 3,75 kWh till 25,00 kWh).
