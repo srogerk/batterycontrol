@@ -16,6 +16,7 @@ import numpy as np
 
 sys.path.append("/workspace/projects/Batteristyrning - effektavgift")
 import src.optimizer as opt
+from src.daily_profit import compute_daily_profit
 
 LOCAL_DIR = "/workspace/projects/Batteristyrning - effektavgift/web"
 HA_HOST = "10.12.22.12"
@@ -47,7 +48,7 @@ def fetch_and_compute():
     # Säkerställ lokal svensk tid för prisuppslag (så att timme matchar Nord Pools lokaltid)
     times = [datetime.datetime.fromisoformat(p["datetime"]).astimezone(TZ_STOCKHOLM) for p in plan]
     p_in, p_out, valid_times = opt.build_price_vector(client, times)
-    client.close()
+    # Obs: client stängs först efter dygnsberäkningen (den behöver HA-historik)
 
     if len(p_in) < len(plan):
         T = len(p_in)
@@ -119,16 +120,30 @@ def fetch_and_compute():
     # Alternativt 15 öre ladd + 15 öre urladd = 30 öre fullcykel, men per Roger är det 15 öre/kWh
     battery_wear_cost = float(total_discharge_kwh * 0.15)
 
-    # Bruttovinst = besparing direkt mot baseline utan batteri
-    gross_profit = cost_without_battery - cost_with_battery
-
-    # Terminalvärdesjustering för batteriets differens (för referens)
+    # Metod A: Lagerförändringskorrigerad vinst
+    # Verklig bruttovinst = (Kostnad utan batt - Kostnad med batt) + (E_slut * P_term - E_start * P_ladd)
     soc_start = float(plan[0]["soc_kwh"])
     soc_end = float(plan[-1]["soc_kwh"])
-    v_term = float(np.mean(p_in))
-    term_diff = (soc_end - soc_start) * v_term
+    p_term = float(p_in[-1]) if len(p_in) > 0 else 2.50
 
+    # Inköpspris för startenergin (nattens billigaste el / gårdagens laddning)
+    # Om det finns kända nattimmar (00-06) tar vi snittet/min därifrån, annars p_term
+    night_prices = [p_in[idx] for idx, dt in enumerate(times) if dt.astimezone(TZ_STOCKHOLM).hour in [0, 1, 2, 3, 4, 5]]
+    p_ladd = float(np.mean(night_prices)) if night_prices else p_term
+
+    inventory_change = (soc_end * p_term) - (soc_start * p_ladd)
+    cashflow_diff = cost_without_battery - cost_with_battery
+    gross_profit = cashflow_diff + inventory_change
     net_profit = gross_profit - battery_wear_cost
+
+    # Dygnsvis vinst (Metod A): förverkligat ur HA-historik + prognos kvar till midnatt
+    # Skydd: om historik-API:t strular ska dashboarden ändå genereras.
+    try:
+        daily = compute_daily_profit(client, quarter_data)
+    except Exception as exc:
+        print(f"Varning: dygnsberäkning misslyckades ({exc})")
+        daily = None
+    client.close()
 
     # Effekttariff / effektavgift nyckelvärden
     now_local = datetime.datetime.now(TZ_STOCKHOLM)
@@ -171,7 +186,10 @@ def fetch_and_compute():
             "cost_with_battery_kr": round(cost_with_battery, 2),
             "cost_without_battery_kr": round(cost_without_battery, 2),
             "battery_wear_cost_kr": round(battery_wear_cost, 2),
-            "terminal_adjustment_kr": round(term_diff, 2),
+            "terminal_adjustment_kr": round(inventory_change, 2),
+            "inventory_change_kr": round(inventory_change, 2),
+            "p_term": round(p_term, 3),
+            "p_ladd": round(p_ladd, 3),
             "total_charge_kwh": round(total_charge_kwh, 1),
             "total_discharge_kwh": round(total_discharge_kwh, 1),
             "max_planned_grid_kw": round(max_planned_grid_kw, 2),
@@ -179,6 +197,7 @@ def fetch_and_compute():
             "target_07_soc": target_07_soc,
             "tariff_active_season": tariff_month
         },
+        "daily": daily,
         "quarters": quarter_data
     }
 
@@ -366,9 +385,9 @@ def build_html(data):
   <!-- KPI Grid -->
   <div class="kpi-grid">
     <div class="kpi-card">
-      <div class="kpi-title">Estimerad Bruttovinst</div>
-      <div class="kpi-value kpi-val-green" id="kpi-profit">+0.00 kr</div>
-      <div class="kpi-sub" id="kpi-profit-sub">Arbitrage vs direktförbrukning</div>
+      <div class="kpi-title">ESTIMERAD VINST (DYGN)</div>
+      <div class="kpi-value kpi-val-green" id="kpi-day-profit">-- / --</div>
+      <div class="kpi-sub" id="kpi-day-sub">Idag hittills: -- | Prognos kvar: -- | Lager: -- | Slitage: -- | Nettovinst: --</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-title">Batteri Status (SOC)</div>
@@ -376,7 +395,7 @@ def build_html(data):
       <div class="kpi-sub" id="kpi-soc-sub">Mål 07:00: -- % | Spärr: -- %</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-title">Börvärde Just Nu</div>
+      <div class="kpi-title">BATTERI EFFEKT</div>
       <div class="kpi-value" id="kpi-next-flow">0.0 kW</div>
       <div class="kpi-sub" id="kpi-spot-now">Inköpspris nu: -- kr/kWh</div>
     </div>
@@ -462,8 +481,26 @@ def build_html(data):
       badge.className = "badge badge-off";
     }}
 
-    document.getElementById("kpi-profit").innerText = (D.metrics.gross_profit_kr >= 0 ? "+" : "") + D.metrics.gross_profit_kr.toFixed(2) + " kr";
-    document.getElementById("kpi-profit-sub").innerText = "Utan batteri: " + D.metrics.cost_without_battery_kr.toFixed(2) + " kr | Med: " + D.metrics.cost_with_battery_kr.toFixed(2) + " kr";
+    // Dygnskort: Idag / Imorgon (per dygn, Metod A)
+    const fmt = (x, dec) => x.toFixed(dec).replace(".", ",");
+    const sgn = (x) => (x >= 0 ? "+" : "");
+    const dy = D.daily;
+    if (!dy || !dy.today) {{
+      document.getElementById("kpi-day-profit").innerText = "-- / --";
+      document.getElementById("kpi-day-sub").innerText = "Dygnsdata ej tillgänglig";
+    }} else {{
+      const tomStr = dy.tomorrow ? fmt(dy.tomorrow.cashflow_kr, 0) : "-";
+      document.getElementById("kpi-day-profit").innerText = fmt(dy.today.cashflow_kr, 0) + " / " + tomStr;
+      let daySub = "Idag hittills: " + fmt(dy.today.realized_kr, 0)
+        + " | Prognos kvar: " + fmt(dy.today.forecast_kr, 0)
+        + " | Lager: " + sgn(dy.today.inventory_kr) + fmt(dy.today.inventory_kr, 1)
+        + " | Slitage: " + fmt(-dy.today.wear_kr, 1)
+        + " | Nettovinst: " + sgn(dy.today.net_kr) + fmt(dy.today.net_kr, 1) + " kr";
+      if (dy.yesterday) {{
+        daySub += " | Går: " + sgn(dy.yesterday.net_kr) + fmt(dy.yesterday.net_kr, 0) + " kr";
+      }}
+      document.getElementById("kpi-day-sub").innerText = daySub;
+    }}
 
     document.getElementById("kpi-soc").innerText = D.current.soc_percent.toFixed(1) + " %";
     document.getElementById("kpi-soc-sub").innerText = "Mål 07:00: " + (D.metrics.target_07_soc ? D.metrics.target_07_soc.toFixed(0) + "%" : "Ej aktiv") + " | Spärr: " + D.current.backup_soc + "%";
@@ -471,7 +508,7 @@ def build_html(data):
     if (D.current.next_charge_kw > 0.05) {{
       document.getElementById("kpi-next-flow").innerHTML = '<span class="tag-chg">+' + D.current.next_charge_kw.toFixed(2) + ' kW (Laddar)</span>';
     }} else if (D.current.next_discharge_kw > 0.05) {{
-      document.getElementById("kpi-next-flow").innerHTML = '<span class="tag-dis">-' + D.current.next_discharge_kw.toFixed(2) + ' kW (Urladdar)</span>';
+      document.getElementById("kpi-next-flow").innerHTML = '<span class="tag-dis">-' + D.current.next_discharge_kw.toFixed(2) + ' kW</span>';
     }} else {{
       document.getElementById("kpi-next-flow").innerText = "0.0 kW (Väntar)";
     }}
