@@ -166,7 +166,11 @@ def optimize_v2(soc_now_kwh: float,
     total_vars = base_vars + num_tariff_days
 
     c = np.zeros(total_vars)
-    v_term = np.mean(p_in)   # Terminalvärde för batteriets kvarvarande energi
+    # Terminalvärde för batteriets kvarvarande energi vid horisontens slut:
+    # Värderas till det förväntade nattpriset vid/efter horisonten (sista kända kvartens elpris),
+    # snarare än dygnsmedelvärdet. Detta förhindrar att optimeraren sparar batterienergi mot dyr
+    # dagel eller panikladdar till 100% före midnatt.
+    v_term = float(p_in[-1])
 
     # Kostnader per variabel
     for t in range(T):
