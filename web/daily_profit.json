@@ -4,5 +4,11 @@
   "inventory_kr": 28.23,
   "wear_kr": 4.12,
   "net_kr": 9.2
+ },
+ "2026-11-09": {
+  "cashflow_kr": 83.26,
+  "inventory_kr": -48.91,
+  "wear_kr": 4.03,
+  "net_kr": 30.33
  }
 }
