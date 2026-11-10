@@ -25,8 +25,10 @@ import numpy as np
 import scipy.optimize
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.optimizer import HAPriceAndStateClient, build_price_vector, is_effekttariff_day, get_p_dag_floor_kw
+from src.optimizer import (HAPriceAndStateClient, build_price_vector,
+                           is_effekttariff_day, get_p_dag_floor_kw)
 from src import ev_block
+from src import rescue_hour as rescue_hour_mod
 
 # Konstanter enligt spec
 NOMINAL_CAPACITY_KWH = 25.0
@@ -62,9 +64,20 @@ def optimize_v2(soc_now_kwh: float,
                  ev_charge_ordered: bool = False,
                  ev_booking: dict = None,
                  ev_now: datetime.datetime = None,
-                 prev_charge_kw: float = 0.0):
+                 prev_charge_kw: float = 0.0,
+                 hour_used_kwh: float = None,
+                 hour_threshold_kw: float = None):
     """
     Kör QP/HiGHS optimering enligt Specifikation 2026-11.
+
+    hour_used_kwh / hour_threshold_kw: "rädda timmen".
+
+    Innevarande klocktimme är delvis förbrukad. hour_used_kwh är netto
+    nätenergi (kWh) som redan gått åt sedan timmens början, och
+    hour_threshold_kw är den tröskel timmedelvärdet ska hålla sig under.
+    Skickas de in får de ÅTERSTÅENDE kvartarna bara använda
+    (tröskel*1h - redan förbrukat) tillsammans, i stället för att LP:n
+    tillåter full effekt som om timmen började nu.
     """
     T = len(timestamps)
     if T == 0:
@@ -326,6 +339,32 @@ def optimize_v2(soc_now_kwh: float,
             A_ub.append(row_eff)
             b_ub.append(p_thresh * hour_len_h - ev_energy_hour)
 
+    # 7b. "Rädda timmen": innevarande klocktimme är delvis förbrukad.
+    #
+    # Utan detta ser LP:n bara de kvartar som återstår och tillåter full effekt
+    # som om timmen började nu. Vid :45 blir det 13.5 kW i ett kvart = 4.97 kW
+    # timmedel mot ett tak på 1.3 kW — en omöjlig kompensation som LP:n inte
+    # känner till. Här får de kvarvarande kvartarna dela på det som ÅTERSTÅR av
+    # timmens energibudget i stället.
+    rescue_active = False
+    if hour_used_kwh is not None and hour_threshold_kw is not None:
+        cur_key = (timestamps[0].date(), timestamps[0].hour)
+        cur_quarters = hour_map.get(cur_key) or []
+        if cur_quarters:
+            budget_kwh = hour_threshold_kw * 1.0 - float(hour_used_kwh)
+            ev_energy_hour = sum(ev_grid_kw[q] * 0.25 for q in cur_quarters)
+
+            row_cur = np.zeros(total_vars)
+            for q in cur_quarters:
+                idx = q * num_vars_per_t
+                row_cur[idx + 0] += 1.0          # grid_load
+                for i in range(num_tiers):
+                    row_cur[idx + 1 + i] += 1.0  # grid_batt
+
+            A_ub.append(row_cur)
+            b_ub.append(max(0.0, budget_kwh - ev_energy_hour))
+            rescue_active = True
+
     # Variabelgränser (bounds)
     bounds = []
     for t in range(T):
@@ -463,11 +502,30 @@ def main():
         # Order av: glöm gammal bokning så nästa order får ett färskt block.
         ev_block.clear_booking()
 
+    # 3c. "Rädda timmen": mät vad innevarande klocktimme redan förbrukat så att
+    #     LP:n inte tillåter full effekt i de kvarvarande kvartarna.
+    rescue_progress = None
+    hour_used_kwh = None
+    hour_threshold_kw = None
+    if is_effekttariff_day(now) and 7 <= now.hour < 20:
+        p_tak_now = get_tariff_floor_p_tak(now)
+        p3_now = 2.49          # uppgift från Göteborg Energi (ersätter tidigare 2.0)
+        try:
+            rescue_progress = rescue_hour_mod.hour_progress(client, now, p_tak_now)
+            hour_used_kwh, hour_threshold_kw = rescue_hour_mod.apply_to_optimizer(
+                rescue_progress, p_tak_now)
+            print(rescue_hour_mod.describe(rescue_progress))
+        except Exception as exc:
+            print(f"[RADDA TIMMEN] kunde inte berakna: {exc}")
+            hour_used_kwh = hour_threshold_kw = None
+
     print(f"Startar v2 HiGHS LP-optimering: SOC={soc_pct:.1f}% ({soc_kwh:.2f} kWh), horisont T={T} kvartar ({T/4:.2f} h).")
     t0 = time.time()
 
     # P3 historisk topp från Göteborg Energi tariff
-    p3_hist = 2.0
+    # P3 = manadens tredje hogsta topp. 2.49 kW enligt uppgift fran
+    # Goteborg Energi (2026-11-10), ersatter tidigare hardkodade 2.0.
+    p3_hist = 2.49
 
     plan, status, obj_val, day_eft = optimize_v2(
         soc_now_kwh=soc_kwh,
@@ -479,7 +537,9 @@ def main():
         p3_historical_kw=p3_hist,
         ev_charge_ordered=ev_order_active,
         ev_booking=ev_booking,
-        ev_now=now
+        ev_now=now,
+        hour_used_kwh=hour_used_kwh,
+        hour_threshold_kw=hour_threshold_kw,
     )
     elapsed = time.time() - t0
 
