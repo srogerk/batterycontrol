@@ -18,11 +18,11 @@ import zoneinfo
 import subprocess
 import numpy as np
 
-sys.path.append("/workspace/projects/Batteristyrning - effektavgift")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import src.optimizer as opt
 import src.optimizer_v2 as opt2
 
-LOCAL_DIR = "/workspace/projects/Batteristyrning - effektavgift/web"
+LOCAL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 HA_HOST = "10.12.22.12"
 HA_TARGET_DIR = "/config/www/batterycontrol"
 SSH_KEY = "/workspace/id_ed25519"
@@ -57,6 +57,13 @@ def run_v2_and_build_data(ev_ordered=False):
 
     client.close()
 
+    # Elbilsblocket är fast förankrat i tiden (se src/ev_block.py) — här används
+    # samma bokning som run_loop, inte en ny sökning per anrop.
+    from src import ev_block
+    ev_booking = None
+    if ev_ordered:
+        ev_booking, _ = ev_block.resolve_booking(valid_timestamps, p_in, now_local, True)
+
     plan, status, cost, day_eft_prognos = opt2.optimize_v2(
         soc_now_kwh=soc_kwh,
         load_forecast_kw=load_f,
@@ -66,7 +73,8 @@ def run_v2_and_build_data(ev_ordered=False):
         timestamps=valid_timestamps,
         p3_historical_kw=2.0,
         ev_charge_ordered=ev_ordered,
-        ev_remaining_hours=3.0
+        ev_booking=ev_booking,
+        ev_now=now_local
     )
 
     if not plan:

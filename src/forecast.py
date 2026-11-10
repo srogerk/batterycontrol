@@ -21,7 +21,19 @@ HA_USER = "root"
 SSH_KEY = "/workspace/id_ed25519"
 REFRESH_TOKEN_ID = "2e524fc4f7254527b734d719720a6230"
 JWT_KEY = "4bf3f2bb0d22f9220eb4ca4a90263b81b071c05b86a50e27104dcfe392ee49b71840a81f8bedab36d28450d428e380021d34da8c9a79f9570bc5f7f146b77826"
-PERSISTENCE_FILE = "/workspace/projects/Batteristyrning - effektavgift/src/forecast_state.json"
+def _persistence_file():
+    """Tillståndet måste överleva add-on-uppdateringar -> /data i add-on-läge."""
+    try:
+        try:
+            from . import paths          # importerad som src.forecast
+        except ImportError:
+            import paths                 # importerad med src/ pa sys.path
+        return paths.data_file("forecast_state.json")
+    except Exception:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "forecast_state.json")
+
+
+PERSISTENCE_FILE = _persistence_file()
 
 def generate_ha_token():
     header = {"alg": "HS256", "typ": "JWT"}
@@ -37,48 +49,40 @@ def generate_ha_token():
     return signing_input + "." + b64(sig)
 
 class HAForecastClient:
+    """
+    Prognosklient. Delegerar till rätt HA-backend (se src/ha_client.py) så att
+    samma kod körs som cron-jobb (SSH) och som HA-add-on (Supervisor).
+
+    get_weather_forecast() är specifik för prognosmodulen och finns bara här.
+    """
+
     def __init__(self):
-        self.ssh = paramiko.SSHClient()
-        self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.ssh.connect(HA_HOST, username=HA_USER, key_filename=SSH_KEY)
-        self.token = generate_ha_token()
+        from src.ha_client import get_client
+        self._client = get_client()
 
-    def get_state(self, entity_id):
-        cmd = f'curl -s http://172.30.32.1:8123/api/states/{entity_id} -H "Authorization: Bearer {self.token}"'
-        stdin, stdout, stderr = self.ssh.exec_command(cmd)
-        res = stdout.read().decode()
-        try:
-            return json.loads(res)
-        except Exception:
-            return None
-
-    def post_state(self, entity_id, state, attributes=None):
-        payload = {"state": str(state), "attributes": attributes or {}}
-        cmd = f'''curl -s -X POST http://172.30.32.1:8123/api/states/{entity_id} \\
-          -H "Authorization: Bearer {self.token}" \\
-          -H "Content-Type: application/json" \\
-          -d '{json.dumps(payload)}' '''
-        stdin, stdout, stderr = self.ssh.exec_command(cmd)
-        return stdout.read().decode()
+    def __getattr__(self, name):
+        # get_state / post_state / call_service / history / read_json_file / close
+        return getattr(self._client, name)
 
     def get_weather_forecast(self):
-        cmd = f'''curl -s -X POST "http://172.30.32.1:8123/api/services/weather/get_forecasts?return_response=true" \\
-          -H "Authorization: Bearer {self.token}" \\
-          -H "Content-Type: application/json" \\
-          -d '{{"entity_id": "weather.smhi_home", "type": "hourly"}}' '''
-        stdin, stdout, stderr = self.ssh.exec_command(cmd)
-        res = json.loads(stdout.read().decode())
-        return res.get("service_response", {}).get("weather.smhi_home", {}).get("forecast", [])
+        # return_response=True krävs: utan den svarar HA med tom kropp och
+        # prognosmodulen tappar tyst sol/väder-data.
+        res = self._client.call_service(
+            "weather", "get_forecasts",
+            {"entity_id": "weather.smhi_home", "type": "hourly"},
+            return_response=True)
+        if isinstance(res, str):
+            try:
+                res = json.loads(res)
+            except json.JSONDecodeError:
+                return []
+        return (res or {}).get("service_response", {}).get("weather.smhi_home", {}).get("forecast", [])
 
     def read_solcast_json(self):
-        sftp = self.ssh.open_sftp()
-        with sftp.open("/homeassistant/solcast_solar/solcast.json") as f:
-            data = json.load(f)
+        data = self._client.read_json_file("/homeassistant/solcast_solar/solcast.json")
         site = list(data["siteinfo"].keys())[0]
         return data["siteinfo"][site]["forecasts"]
 
-    def close(self):
-        self.ssh.close()
 
 def load_state():
     if os.path.exists(PERSISTENCE_FILE):

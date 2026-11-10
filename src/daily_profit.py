@@ -44,7 +44,20 @@ HIST_SOC = "sensor.solis_s6_eh1p_battery_soc"
 PRICE_IMPORT = "sensor.nordpool_predbat_import"
 PRICE_EXPORT = "sensor.nordpool_predbat_export"
 
-DEFAULT_ARCHIVE = "/workspace/projects/Batteristyrning - effektavgift/web/daily_profit.json"
+def _default_archive():
+    """Arkivet hör till data-ytan: /data i en add-on, web/ i utvecklingsläge."""
+    try:
+        try:
+            from . import paths          # importerad som src.daily_profit
+        except ImportError:
+            import paths                 # importerad med src/ pa sys.path
+        return paths.data_file("daily_profit.json")
+    except Exception:
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "web", "daily_profit.json")
+
+
+DEFAULT_ARCHIVE = _default_archive()
 
 
 # ---------------------------------------------------------------- hjälpfunktioner
@@ -54,18 +67,11 @@ def _utc_iso(dt):
 
 
 def _hist(client, entity_id, start_iso, end_iso):
-    """Hämta HA-history (minimal_response) för en sensor mellan två UTC-tider."""
-    url = (
-        f"http://172.30.32.1:8123/api/history/period/{start_iso}"
-        f"?filter_entity_id={entity_id}&end_time={end_iso}&minimal_response&no_attributes"
-    )
-    cmd = f'curl -s "{url}" -H "Authorization: Bearer {client.token}"'
-    stdin, stdout, stderr = client.ssh.exec_command(cmd)
-    try:
-        payload = json.loads(stdout.read().decode() or "[]")
-    except json.JSONDecodeError:
-        return []
-    return payload[0] if payload else []
+    """Hämta HA-history (minimal_response) för en sensor mellan två UTC-tider.
+
+    Går via klientens history()-metod så att båda backends (SSH och Supervisor) fungerar.
+    """
+    return client.history(entity_id, start_iso, end_iso)
 
 
 def _f(rec):
@@ -362,7 +368,7 @@ def compute_daily_profit(client, quarter_data, now_local=None, archive_path=DEFA
 
 if __name__ == "__main__":
     import sys
-    sys.path.append("/workspace/projects/Batteristyrning - effektavgift")
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     import src.optimizer as opt
 
     client = opt.HAPriceAndStateClient()

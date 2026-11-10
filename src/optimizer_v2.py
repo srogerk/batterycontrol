@@ -24,8 +24,9 @@ import holidays
 import numpy as np
 import scipy.optimize
 
-sys.path.append("/workspace/projects/Batteristyrning - effektavgift")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.optimizer import HAPriceAndStateClient, build_price_vector, is_effekttariff_day, get_p_dag_floor_kw
+from src import ev_block
 
 # Konstanter enligt spec
 NOMINAL_CAPACITY_KWH = 25.0
@@ -59,7 +60,8 @@ def optimize_v2(soc_now_kwh: float,
                  p3_historical_kw: float = 0.0,
                  force_effekttariff_tomorrow: bool = False,
                  ev_charge_ordered: bool = False,
-                 ev_remaining_hours: float = 3.0,
+                 ev_booking: dict = None,
+                 ev_now: datetime.datetime = None,
                  prev_charge_kw: float = 0.0):
     """
     Kör QP/HiGHS optimering enligt Specifikation 2026-11.
@@ -80,31 +82,24 @@ def optimize_v2(soc_now_kwh: float,
             hour_map[h_key] = []
         hour_map[h_key].append(t)
 
-    # 2. Elbilsallokering: 3 sammanhängande timmar mellan 22:00 och 07:00 (om beställd)
+    # 2. Elbilsallokering: FAST block (se src/ev_block.py).
+    # Blocket väljs en gång och sparas; vid varje kvart minskar bara det
+    # återstående behovet. Detta förhindrar att fönstret glider framför sig.
+    #
+    # ev_booking kan skickas in av anroparen (run_loop) som redan löst bokningen;
+    # annars byggs arrayen från ev_booking direkt.
     ev_grid_kw = np.zeros(T)
-    if ev_charge_ordered and ev_remaining_hours > 0.0:
-        needed_quarters = int(np.ceil(ev_remaining_hours * 4))
-        # Hitta billigaste sammanhängande fönster mellan 22:00 och 07:00
-        eligible_starts = []
-        for t in range(T - needed_quarters + 1):
-            window_ts = [timestamps[t + k] for k in range(needed_quarters)]
-            # Alla kvartar i fönstret måste ligga i intervallet [22:00 - 07:00]
-            is_valid_window = all((ts.hour >= 22 or ts.hour < 7) for ts in window_ts)
-            if is_valid_window:
-                eligible_starts.append(t)
-
-        if eligible_starts:
-            best_start = min(eligible_starts, key=lambda s: sum(p_in[s + k] for k in range(needed_quarters)))
-            for k in range(needed_quarters):
-                ev_grid_kw[best_start + k] = 5.5
-        else:
-            # Fallback: ta de billigaste kvartarna innan kl 07:00
-            pre_07_indices = [t for t, ts in enumerate(timestamps) if ts.hour < 7]
-            if len(pre_07_indices) >= needed_quarters:
-                # Sortera efter lägsta p_in
-                sorted_idx = sorted(pre_07_indices[:needed_quarters*2], key=lambda t: p_in[t])
-                for t in sorted_idx[:needed_quarters]:
-                    ev_grid_kw[t] = 5.5
+    if ev_booking is not None:
+        ev_grid_kw = ev_block.build_ev_array(timestamps, ev_booking, ev_now or timestamps[0])
+    elif ev_charge_ordered:
+        # Bakåtkompatibel väg: ingen bokning angiven, men order finns.
+        # resolve_booking returnerar (booking, is_new) — packa upp, annars får
+        # build_ev_array en tuple och kastar TypeError.
+        booking, _ = ev_block.resolve_booking(
+            timestamps, p_in, ev_now or timestamps[0], True)
+        if booking is not None:
+            ev_grid_kw = ev_block.build_ev_array(
+                timestamps, booking, ev_now or timestamps[0])
 
     # 3. Förbereda P_eft_prognos och P_tröskel för varje effekttariff-dag
     # Dagar som ingår
@@ -449,6 +444,25 @@ def main():
     ev_order_state = client.get_state("input_boolean.ev_charge_order_10kwh")
     ev_order_active = (ev_order_state and ev_order_state.get("state") == "on")
 
+    # 3b. Lös elbilsblocket EN gång och spara det. Fönstret är fast förankrat
+    #     i tiden — bara det återstående behovet krymper per kvart.
+    ev_booking = None
+    if ev_order_active:
+        order_id_attr = (ev_order_state.get("attributes") or {}).get("order_id")
+        ev_booking, ev_is_new = ev_block.resolve_booking(
+            valid_timestamps, p_in, now, True, order_id=order_id_attr)
+        if ev_is_new and ev_booking:
+            print(f"[ELBIL] Nytt laddblock bokat: "
+                  f"{ev_booking['start']:%Y-%m-%d %H:%M} – {ev_booking['end']:%H:%M} "
+                  f"({ev_booking['kw']} kW)")
+        elif ev_booking:
+            rem, elapsed = ev_block.quarters_remaining(ev_booking, now)
+            print(f"[ELBIL] Fast block {ev_booking['start']:%H:%M}–{ev_booking['end']:%H:%M}, "
+                  f"{rem} kvartar kvar ({rem*0.25:.2f} h), {elapsed} förbrukade")
+    else:
+        # Order av: glöm gammal bokning så nästa order får ett färskt block.
+        ev_block.clear_booking()
+
     print(f"Startar v2 HiGHS LP-optimering: SOC={soc_pct:.1f}% ({soc_kwh:.2f} kWh), horisont T={T} kvartar ({T/4:.2f} h).")
     t0 = time.time()
 
@@ -464,7 +478,8 @@ def main():
         timestamps=valid_timestamps,
         p3_historical_kw=p3_hist,
         ev_charge_ordered=ev_order_active,
-        ev_remaining_hours=3.0
+        ev_booking=ev_booking,
+        ev_now=now
     )
     elapsed = time.time() - t0
 
