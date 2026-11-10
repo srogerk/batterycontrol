@@ -502,18 +502,31 @@ def main():
         # Order av: glöm gammal bokning så nästa order får ett färskt block.
         ev_block.clear_booking()
 
+    # P3 historisk topp från Göteborg Energi tariff
+    # P3 = manadens tredje hogsta topp. 2.49 kW enligt uppgift fran
+    # Goteborg Energi (2026-11-10), ersatter tidigare hardkodade 2.0.
+    p3_hist = 2.49
+
     # 3c. "Rädda timmen": mät vad innevarande klocktimme redan förbrukat så att
     #     LP:n inte tillåter full effekt i de kvarvarande kvartarna.
+    #
+    #     Tröskeln måste vara SAMMA som LP:ns effekttariffrad använder
+    #     (max(p_tak, P3, p_eft_prognos)). Att mäta mot bara säsongsgolvet
+    #     1.3 kW vore strängare än nödvändigt och skulle ladda ur batteriet
+    #     i onödan — LP:n tillåter ju upp till 2.49 kW innan P3-toppen höjs.
     rescue_progress = None
     hour_used_kwh = None
     hour_threshold_kw = None
     if is_effekttariff_day(now) and 7 <= now.hour < 20:
         p_tak_now = get_tariff_floor_p_tak(now)
-        p3_now = 2.49          # uppgift från Göteborg Energi (ersätter tidigare 2.0)
         try:
-            rescue_progress = rescue_hour_mod.hour_progress(client, now, p_tak_now)
+            # Prognosen för dagen finns först efter att day_eft_prognos byggts,
+            # men p_eft_prognos är en konservativ skattning som bara höjer taket.
+            # Använd det som redan är känt här; P3 är i praktiken styrande.
+            p_now = max(p_tak_now, p3_hist)
+            rescue_progress = rescue_hour_mod.hour_progress(client, now, p_now)
             hour_used_kwh, hour_threshold_kw = rescue_hour_mod.apply_to_optimizer(
-                rescue_progress, p_tak_now)
+                rescue_progress, p_now)
             print(rescue_hour_mod.describe(rescue_progress))
         except Exception as exc:
             print(f"[RADDA TIMMEN] kunde inte berakna: {exc}")
@@ -521,11 +534,6 @@ def main():
 
     print(f"Startar v2 HiGHS LP-optimering: SOC={soc_pct:.1f}% ({soc_kwh:.2f} kWh), horisont T={T} kvartar ({T/4:.2f} h).")
     t0 = time.time()
-
-    # P3 historisk topp från Göteborg Energi tariff
-    # P3 = manadens tredje hogsta topp. 2.49 kW enligt uppgift fran
-    # Goteborg Energi (2026-11-10), ersatter tidigare hardkodade 2.0.
-    p3_hist = 2.49
 
     plan, status, obj_val, day_eft = optimize_v2(
         soc_now_kwh=soc_kwh,
