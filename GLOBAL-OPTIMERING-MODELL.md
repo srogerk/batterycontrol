@@ -1,7 +1,7 @@
 # Global optimeringsmodell för batteristyrning
 
-*Logisk grund: Rogers specifikation "Specifikation för batterycontrol" (2026-11-10).*
-*Dokumentet ersätter tidigare version (2026-10-28). Vad som utgått och varför framgår av §9.*
+*Logisk grund: Rogers specifikation "Specifikation för batterycontrol" (2026-11-10, version 2).*
+*Dokumentet ersätter tidigare version (2026-10-28). Vad som utgått och varför framgår av §11.*
 
 ---
 
@@ -35,6 +35,9 @@ Verkningsgrad: **η_ladd = 0,95** och **η_urladd = 0,95**, dvs rundtur 0,9025.
 |---|---|
 | 3 | **Inköpspris** = spotpris **med** moms + avgifter (ca 0,50 kr/kWh). **Säljpris** = spotpris **utan** moms + nätnytta (0,07 kr/kWh). |
 | 10 | Under effekttarifftid läggs effekttariffen till elleverantörens pris för inköpt el och **ingår sedan i optimerarens indata**. |
+
+**Ingen skattereduktion** ingår i säljpriset — specifikationen anger uttryckligen bara
+spotpris utan moms + nätnytta.
 
 ### 2.3 Effektavgift
 
@@ -88,8 +91,8 @@ uppdaterad SOC och uppdaterade prognoser, och endast det första kvartet verkst�
 
 ### 3.2 Flödesmodell
 
-El förbrukas **enbart genom hushållsanvändning**. I denna version **säljer systemet inte el
-från batteriet**; den export som modelleras är solel som blir över.
+El förbrukas **enbart genom hushållsanvändning**. I denna version säljer systemet
+**inte batteriel** — den export som modelleras är enbart solel som blir över.
 
 Fyra flöden måste hela tiden vara i balans: **från nätet, in i batteriet, ut ur batteriet,
 till hushållet.**
@@ -134,12 +137,13 @@ $$J = \sum_{t} \Bigl( p^{in}_t E_{import,t} - p^{ut}_t E_{pv\_grid,t} \Bigr) + C
 
 **Optimeringspåslag (kategori "optimering"):**
 
-- **Effekttrappsteg på batteriladdning.** Fem steg om 2 kW (0–10 kW). Påslaget är linjärt
-  0,04 kr per kW och ackumuleras per steg, så att stegmittpunkterna 1/3/5/7/9 kW straffas
-  med 0,04/0,12/0,20/0,28/0,36 kr. Det ger exakt brytpunkten i regel 9: vid 5 kW är
-  påslaget 0,20 kr, dvs en annan kvart är mer fördelaktig upp till 0,20 kr prisskillnad.
-- **Växlingsdämpning.** Ett påslag på ändringen i batteriladdning mellan intilliggande
-  kvartar (`dP_chg`), för att undvika av-/påslag. Se §8 fråga 4 för tolkning av tecknet.
+- **Effekttrappsteg på batteriets ladd- och urladdningseffekt.** Fem steg om 2 kW (0–10 kW).
+  Påslaget är linjärt **0,04 kr per kW** och ackumuleras per steg, så att stegmittpunkterna
+  1/3/5/7/9 kW straffas med 0,04/0,12/0,20/0,28/0,36 kr. Vid 5 kW är påslaget 0,20 kr, dvs
+  en annan kvart är mer fördelaktig upp till 0,20 kr prisskillnad — exakt brytpunkten i
+  regel 9.
+- **Växlingsdämpning.** Ett påslag på batterieffekten in och ut för **effekt i intilliggande
+  kvartar**.
 - **Av-/påslag.** Ett påslag när batteriladdningen växlar från av till på eller på till av.
 
 ### 3.5 Begränsningar
@@ -183,17 +187,29 @@ alternativ men inte valda). Beräkningstiden för en horisont på ett dygn är t
 
 ### 4.1 Princip
 
-En **beredande beräkning** räknar fram de effektgränser som effekttariffens utformning ger
-upphov till och definierar korrekta prisfunktioner för den merkostnad tariffen genererar.
-Därefter utförs optimeringen som vanligt. Detta är skälet till att inga separata
+En **beredande beräkning** räknar fram den effektgräns som uppstår baserat på
+effekttariffens utformning, och definierar prisfunktioner för den merkostnad tariffen
+genererar. Därefter utförs optimeringen som vanligt — det är skälet till att inga separata
 heuristiska tariffregler behövs.
 
-### 4.2 Definitioner
+### 4.2 Prisfunktionen
+
+Effektgränsen (taket) implementeras som en **brant prisökning från 0 vid tak-effekten**:
+
+$$pris(P) = \max\bigl(0,\ (P - P_{tak}) \cdot 45\bigr)$$
+
+Exempel: tak vid 2,5 kW ger `pris(P) = max(0, (P − 2,5) · 45)`.
+
+Priset är alltså **noll ända upp till taket** och växer sedan linjärt med 45 kr per kW
+överstigande timmedeleffekt. **Optimering sker på prisfunktionen för kvarts-effekt-gränsen**
+(§4.5), inte på timgränsen direkt.
+
+### 4.3 Definitioner
 
 - Effektförbrukningen avser **alltid effekten in från nätet** och **kompenseras inte** av
   eventuell export mot nätet.
 - Effektförbrukningen mäts som **medelvärdet av effekten under en klocktimma**, dvs
-  energiimporten under en klocktimma.
+  energiimporten från nätet under en klocktimma.
 - Tariffen är **0** om energiimporten under en klocktimma understiger det högsta av
   - den **3:e högsta** klocktimimporten under innevarande månad (MTD), och
   - den **högsta** klocktimimporten under innevarande tariffönster (07:00–20:00).
@@ -202,78 +218,96 @@ heuristiska tariffregler behövs.
 - Beräkningen handlar alltså om att hitta **brytpunkten mellan 0 och 45 kr/kWh**.
   Kostnaden tillhör kategorin **"faktisk"**.
 
-### 4.3 Indata som krävs
+### 4.4 Taket
+
+Beredningen räknar fram effektgränsen:
+
+$$P_{tak} = \max\bigl(P_{mån\text{-}min},\ P_3,\ P_{max}\bigr)$$
+
+| Term | Betydelse |
+|---|---|
+| `P_mån-min` | **Undre gräns** för tariffens brytpunkt. 1,3 kW för nov, feb, mars; 1,6 kW för dec, jan. |
+| `P_3` | Månadens **3:e största** timmedeleffekt — faktisk förbrukning. |
+| `P_max` | **Hittills högsta faktiska** medeleffekt under en klocktimma i **innevarande tariffönster**. |
+
+**Om `P_mån-min`:** gränsen finns för att **förhindra onödiga battericykler** orsakade av
+optimering mot effektgränser som ligger under den förväntade effekttoppen för månaden. Den
+avspeglar den lägst möjliga energiförbrukningen per klocktimma baserat på månadens högsta
+förväntade importförbrukning under ett tariffönster. Exempel: en decemberdag där det behövs
+46 kWh import, med 20 kWh tillgängligt i batteriet kl 07:00, kräver totalt 26 kWh import =
+**2 kWh/h** i tariffönstret. Denna kostnad är "faktisk" och har ett **negativt prispåslag** —
+för optimeraren "är det gratis upp till undre gränsen".
+
+### 4.5 Kvartsgränser inom innevarande timme
+
+- **Samma timgräns gäller för alla timmar framåt i planen** inom ett och samma effektfönster.
+- Timgränsen kan **ändras uppåt** vid nästa kvart, när planen räknas om med delvis nya
+  ingångsvärden — specifikt "högsta faktiska timmedeleffekt" i innevarande effektfönster.
+- **Kvartsgränserna varierar mellan kvartarna i innevarande timme**, beroende på det
+  **verkliga effektmedelvärdet upp till "nu"** och det prognostiserade medeleffektbehovet
+  under resten av timmen.
+- **Kvartsgränsen för framtida kvartar efter innevarande timme är samma som timgränsen.**
+
+Innan optimeringen börjar läser beredningen av **faktisk upplupen energi-nät-import denna
+klocktimma** och för in värdet i beräkningen av kvarts-prisfunktionerna. Effektgränsen för
+import **sänks eller höjs** för resterande kvartar i innevarande timme så att medeleffekten
+för dem hamnar **just under** nätimportens effekttak. Beräkningen består av både faktiskt
+uppmätt medeleffekt och uppskattning för innevarande och framtida kvartar.
+
+### 4.6 Indata som krävs
 
 | Symbol | Betydelse |
 |---|---|
-| `P1, P2, P3` | Dygnets ingångsvärden för alla 3 månadstoppar MTD (Month-To-Date) |
-| `Emax` | Hittills högsta faktiska tim-energi-import under innevarande tariffönster |
-| `Enow` | Hittills faktiskt importerad energi under innevarande timma |
-| `Pses` | Månadens undre gräns för tariffens brytpunkt: **1,3 kW** (nov, feb, mar) eller **1,6 kW** (dec, jan) |
-| `SOC` | Ingående SOC, för att uppskatta kvarvarande energi-import-behov i tariffönstret |
+| `P1, P2, P3` | Dygnets ingångsvärden för alla 3 månadstoppar MTD. **Orsaken:** P1, P2, P3 för morgondagens effektfönster ändras om det blir en effekttimma i dagens fönster som är högre än P3, och kanske även P2 och P1. |
+| `P_now` | Hittills faktiskt importerad **medeleffekt** under innevarande timma. |
+| `P_mån-min` | Månadens undre gräns för tariffens brytpunkt — 1,3 eller 1,6 kW. |
+| `SOC` | Ingående SOC (tillgänglig energi i batteriet), för att uppskatta kvarvarande energi-import-behov i tariffönstret. |
 
-**Om `Pses`:** gränsen avspeglar den lägst möjliga energiförbrukningen per klocktimma
-baserat på månadens högsta förväntade importförbrukning under ett tariffönster. Exempel: en
-Decemberdag där det behövs 46 kWh import, med 20 kWh tillgängligt i batteriet kl 07:00,
-kräver totalt 26 kWh import = **2 kWh/h** i tariffönstret. Denna kostnad är "faktisk" men
-har ett **negativt prispåslag** — för optimeraren är det gratis upp till den undre gränsen.
-Gränsen finns för att undvika onödig användning av batteriet.
-
-### 4.4 Brytpunkt och kvartstak
-
-Brytpunkten för effekttariffen är
-
-$$P_{bryt} = \max(P_{ses},\ P_3,\ E_{max},\ P_{eft\text{-}prognos})$$
-
-och är 45 kr/kWh, mätt vid timmens slut.
-
-Beredningen räknar fram en effektgräns per kvart:
-
-$$P_{kvart} = \max(P_{säsong},\ P_{optimal})$$
-
-där `P_optimal` är det minsta av de ingående gränserna (P3, timgränsen och prognosen).
-**Formeln i specifikationen är avklippt mitt i uttrycket** — se §8, fråga 2.
-
-**Notera:** effekttaket som räknas fram ur avgiftens utformning gäller
-**effektmedelvärdet under en klocktimma**. För styrningen på 15-minutersnivå varierar
-därför taket beroende på hur mycket effekt som redan är upplupen under timmen.
-
-### 4.5 Kvarvarande behov
-
-Beredningen beräknar:
+Beredningen behöver beräkna:
 - **Kvarvarande energi-import-behov denna timma.**
 - **Kvarvarande energi-import-behov i tariffönstret.**
 
-Innan optimeringen börjar läser beredningen av **faktisk upplupen energi-nät-import denna
-klocktimma** och för in värdet i beräkningen av prisfunktionerna. Effektgränsen för import
-sänks för resterande kvartar så att medeleffekten för dem hamnar **just under**
-nätimportstaket. Beräkningen består av både faktiskt uppmätt medeleffekt och uppskattning
-för innevarande och framtida kvartar.
+### 4.7 "Rädda timmen"
 
-### 4.6 "Rädda timmen"
-
-Utan kompensation för upplupen timenergi ser optimeraren bara de kvartar som återstår och
-tillåter full effekt som om timmen började nu. Vid `:45` skulle det ge 13,5 kW i ett kvart
-= 4,97 kW timmedel mot ett tak på 1,3 kW — en omöjlig kompensation som optimeraren inte
-känner till.
+Kvartsgränserna i §4.5 är den mekanism som gör "rädda timmen" möjlig. Utan kompensation för
+upplupen timenergi ser optimeraren bara de kvartar som återstår och tillåter full effekt som
+om timmen började nu. Vid `:45` skulle det ge 13,5 kW i ett kvart = 4,97 kW timmedel mot ett
+tak på 1,3 kW — en omöjlig kompensation som optimeraren inte känner till.
 
 **Mekanism:** de kvarvarande kvartarna i innevarande klocktimme får dela på det som
 **återstår** av timmens energibudget:
 
 ```
-budget = P_bryt · 1,0 h − E_now
+budget = P_tak · 1,0 h − E_now
 ```
 
 Bindningen läggs på summan av nätimport (huslast + batteriladdning) över innevarande
 klocktimmens kvarvarande kvartar. Vid negativ budget blir taket 0 — timmen är då redan
 förbrukad och kan inte räddas, men optimeringen ska ändå inte föreslå absurd import.
 
-**Detta är ett krav, inte en optimering:** "rädda timmen" måste fungera under
+**Detta är ett uttryckligt krav, inte en optimering:** "rädda timmen" måste fungera under
 effekttaxeperioder.
 
 ---
 
-## 5. Billaddning
+## 5. Solpaneler
+
+- Det finns solpaneler i invertersystemet.
+- Energi från solpanelerna kan styras till:
+  - **egenförbrukning**,
+  - **export** av överskottet till nätet,
+  - **laddning av batteriet**,
+  - en **kombination** därav, eller
+  - **enbart laddning av batteriet**, varvid hushållet tar sin energi från nätet.
+
+Det sista fallet är ekonomiskt motiverat när solelen är värd mer lagrad än direkt förbrukad —
+t.ex. när den kan säljas dyrare senare, eller när nätimporten under tariffönstret ändå är
+gratis upp till `P_mån-min` (§4.4). Det kräver att `E_pv_batt` och `E_grid_load` kan vara
+positiva samtidigt, vilket flödesmodellen i §3.2 medger.
+
+---
+
+## 6. Billaddning
 
 - Billaddblocket är **fast förankrat i tiden** och ändras inte för varje kvartsoptimering.
 - Optimeringen måste ta hänsyn till **var i blocket** laddningen börjar — den ska inte
@@ -285,7 +319,7 @@ effekttaxeperioder.
 
 ---
 
-## 6. Implementationsbeaktanden
+## 7. Implementationsbeaktanden
 
 1. Systemet (BatteryControl) är **integrerat med Home Assistant**.
 2. Den faktiska styrningen görs via integrationen **"Solis Modbus"**.
@@ -294,46 +328,78 @@ effekttaxeperioder.
 
 ---
 
-## 7. Kvar att fastställa
+## 8. Kvar att fastställa
 
 1. **Testplan:** köra modellen offline mot historiska data från 2025 för att verifiera
    beteendet mot "backmetoden".
 
-*(Verkningsgrader, cykelkostnad och lösare är avgjorda: 0,95/0,95, 0,15+0,15 kr/kWh, HiGHS.)*
+*(Verkningsgrader, cykelkostnad, påslagsnivå och lösare är avgjorda: 0,95/0,95,
+0,15+0,15 kr/kWh, 0,04 kr/kW, HiGHS.)*
 
 ---
 
-## 8. Öppna frågor i specifikationen
+## 9. Frågor från föregående dokumentversion — nu besvarade
 
-Punkter där specifikationen är otydlig, avklippt eller motsäger sig själv. **Inte tolkade
-här** — de behöver Rogers besked.
+Sex punkter var oklara i specifikationens första version. Alla är utredda i version 2 och
+ligger nu inarbetade i texten ovan.
 
-1. **Regel 9 — "0,04 öre per kW".** Exemplet ger 0,20 kr vid 5 kW, vilket innebär
-   **0,04 kr = 4 öre** per kW. Koden använder 0,04 kr. Tolkningen som ligger i dokumentet
-   är 0,04 kr/kW.
+| # | Fråga | Svar |
+|---|---|---|
+| 1 | Regel 9 säger "0,04 **öre** per kW" men exemplet ger 0,20 kr vid 5 kW | **0,04 kr/kW.** Specens avsnitt 2 säger uttryckligen "0,04 **kr** per kW" två gånger, och 0,20 kr vid 5 kW bekräftar. §2.4. |
+| 2 | Formeln för effektgränsen var avklippt | **`P_tak = max(P_mån-min, P3, P_max)`** — §4.4. |
+| 3 | En mening om "timma, dygn-fönster och månad" var halv | **Utgår.** Ersatt av den utförliga beskrivningen i §4.5 om hur kvartsgränser varierar inom timmen men är konstanta framåt. |
+| 4 | "**Negativt** optimeringspåslag för effekt i intilliggande kvartar" — koden har positivt | **Positivt påslag.** Version 2 säger "ett optimerings-påslag på batterieffekten in och ut för effekt i intilliggande kvartar" — ordet "negativt" är borta. §3.4. |
+| 5 | "Säljer systemet inte el" samtidigt som koden intäktsför PV-export | **"säljer systemet inte batteri-el"** — förtydligat i version 2. PV-export är avsedd och modellerad. §3.2. |
+| 6 | Skattereduktion 60 öre i säljpriset? | **Nej.** Säljpris = spot utan moms + nätnytta 0,07. §2.2. |
 
-2. **§4.4 — avklippt formel.** `Poptimal = min(P3,Ptim,POptimeraren har också en undre
-   gräns…` — uttrycket saknar sin avslutning. Vilka termer ingår i `min(...)`, och i vilken
-   ordning förhåller de sig till `P_kvart`?
+**Nytt i version 2 som inte fanns i version 1:**
 
-3. **§4.2 — avbruten mening.** "För att hantera styrning mot de fönster som anges av
-   effekttariffdefinitionen, dvs timma, dygn-fönster, och månad," — meningen fullföljs inte.
-
-4. **"Negativt optimeringspåslag … för effekt i intilliggande kvartar" (§3.2).**
-   Koden har ett **positivt** påslag (0,02 kr) på ändringen mellan kvartar, vilket straffar
-   växling. Ett negativt påslag skulle belöna växling. Vilket är avsett?
-
-5. **Säljer systemet el?** §2.2 säger "I dagsläget säljer systemet inte el", men koden
-   modellerar och intäktsför **PV-export** (`E_pv_grid`, `−p_out`). Meningen ska troligen
-   läsas som "säljer inte *batteriel*" — bekräfta.
-
-6. **Skattereduktion.** Tidigare version nämnde skattereduktion (60 öre/kWh) i säljpriset.
-   Nya specifikationen anger bara spotpris utan moms + nätnytta. Är skattereduktion
-   fortfarande tillämplig, eller är den borttagen?
+- **Prisfunktionen som ramp** — `pris(P) = max(0, (P − P_tak) · 45)` (§4.2). Tidigare version
+  beskrev bara att en "prisfunktion" skulle definieras, inte hur.
+- **`P_max`** — hittills högsta faktiska timmedeleffekt i innevarande tariffönster, som
+  tredje term i taket (§4.4).
+- **Kvartsgränser vs timgräns** — att timgränsen är konstant framåt i fönstret medan
+  kvartsgränserna varierar inom innevarande timme (§4.5). Se §10 p.6: detta är bara
+  delvis byggt i koden.
+- **Eget avsnitt om solpanelerna** (§5), inklusive fallet att hushållet tar energi från
+  nätet medan solelen enbart laddar batteriet.
 
 ---
 
-## 9. Information från tidigare version — status
+## 10. Gap mellan specifikationen och koden
+
+Punkter där specifikationen kräver något som `src/` ännu inte har. **Detta är
+implementationsuppgifter, inte oklarheter i specifikationen.**
+
+1. **`P_max` saknas.** Specen kräver "hittills högsta faktiska medeleffekt under en
+   klocktimma i innevarande tariffönster". Ingen sådan storlek beräknas i koden
+   (0 grep-träffar på `Pmax`/`Emax`).
+
+2. **`P_3` är hårdkodad.** Koden använder `p3_hist = 2.49` från ett engångsbesked från
+   Göteborg Energi. Specen kräver `P1, P2, P3` **MTD**, uppdaterade — eftersom dagens
+   effekttimma kan tränga in i topp-3 och ändra morgondagens ingångsvärden.
+
+3. **`p_eft_prognos` finns i koden men inte i specen.** Kodens tröskel är
+   `max(p_tak, P3, p_eft_prognos)`. Specens formel är `max(P_mån-min, P3, P_max)` — prognos-
+   termen är alltså **borttagen** och ersatt av `P_max`. Termen behöver antingen tas bort
+   eller motiveras.
+
+4. **Taket är per dag i koden, per effektfönster i specen.** Koden lägger en
+   `P_peak_excess`-variabel och ett `p_thresh` **per tariffdag**. Specen säger att *samma*
+   timgräns gäller för alla timmar framåt inom ett effektfönster. Vid horisonter som spänner
+   över dygnsgränsen behöver detta stämmas av.
+
+5. **Prisfunktionen är en slack-variabel i koden, en ramp i specen.** Matematiskt ger de
+   samma marginalkostnad (45 kr per kW överstigande timmedel), men formuleringarna skiljer
+   sig. Värt att verifiera att de ger identiska planer.
+
+6. **Kvartsgränserna i §4.5 är bara delvis byggda.** Koden har "rädda timmen" för
+   innevarande timme (`rescue_hour`), men ingen generell kvartsgräns som varierar mellan
+   kvartarna i timmen enligt formeln i §4.5 — och ingen som sänker/höjer per kvart.
+
+---
+
+## 11. Information från tidigare version — status
 
 Varje uppgift i dokumentet från 2026-10-28, med bedömning. Poster som utgår anges med skäl.
 
@@ -351,9 +417,9 @@ Varje uppgift i dokumentet från 2026-10-28, med bedömning. Poster som utgår a
 | **Prisdata: spotpris per kvart + marginalpriser** | **Kvar**, förtydligat som separata `p_in` / `p_out` (§2.2, §3.4). |
 | **Ingående SOC = faktiskt uppmätt vid planens start** | **Kvar**, §3.1. |
 | **Utgående SOC fri variabel med terminalfunktion** | **Kvar**, §3.6 — med exakt implementation (sista kända importpriset). |
-| **Åtta flödesvariabler inkl. `E_batt→nät`** | **Delvis utgår.** PV-export finns; batteriexport är inte implementerad och enligt spec §2.2 inte avsedd i denna version. |
-| **Curtailment (`E_curtail`)** | **Utgår tills vidare.** Behövs bara om soleffekten kan överstiga exportkapaciteten. Inte modellerat; får återinföras om det blir aktuellt. |
-| **`p_ut` = spot + skattereduktion 60 öre + nätnytta − avgifter** | **Utgår tills vidare** — se §8 fråga 6. |
+| **Åtta flödesvariabler inkl. `E_batt→nät`** | **Delvis utgår.** PV-export finns; batteriexport är inte implementerad och enligt §3.2 inte avsedd i denna version. |
+| **Curtailment (`E_curtail`)** | **Utgår tills vidare.** Solens balans är en likhet — all sol måste användas, lastas eller exporteras. Får återinföras om soleffekten kan överstiga exportkapaciteten. |
+| **`p_ut` = spot + skattereduktion 60 öre + nätnytta − avgifter** | **Utgår.** Nya specen anger uttryckligen spot utan moms + nätnytta 0,07 — ingen skattereduktion. |
 | **`C_batteri` ca 30 öre/kWh helcykel** | **Kvar**, preciserat 0,15 + 0,15 (§2.1). |
 | **SOC-dynamik med verkningsgrad** | **Kvar**, §3.2. η = 0,95/0,95. |
 | **Binär variabel `z_t` för icke-samtidighet** | **Utgår.** Bevisas onödig av strikt positiva marginalkostnader (§3.5 p.3) — modellen förblir LP. |
@@ -365,4 +431,4 @@ Varje uppgift i dokumentet från 2026-10-28, med bedömning. Poster som utgår a
 | **Kvar att fastställa: verkningsgrader** | **Avgjort** — 0,95/0,95. |
 | **Kvar att fastställa: cykelkostnadens fördelning** | **Avgjort** — 0,15 in / 0,15 ut. |
 | **Kvar att fastställa: val av lösare** | **Avgjort** — HiGHS. |
-| **Kvar att fastställa: testplan mot historiska 2025-data** | **Kvar**, §7. |
+| **Kvar att fastställa: testplan mot historiska 2025-data** | **Kvar**, §8. |
