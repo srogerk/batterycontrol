@@ -206,7 +206,18 @@ def build_ev_array(timestamps, booking, now):
     start, end = booking["start"], booking["end"]
     kw = booking.get("kw", BLOCK_KW)
 
+    # "nu" avrundas NEDÅT till kvartens början. Tidigare jämfördes mot exakt
+    # nuvarande tidpunkt, vilket gjorde att den innevarande kvarten aldrig fick
+    # effekt: klockan 04:11 är timestamps[0] = 04:00 och 04:00 >= 04:11 är falskt.
+    # Följden var att ev_charge_now alltid blev False och laddboxen stängdes av
+    # var 15:e sekund utan att bilen någonsin laddade. Kvartar som redan passerat
+    # får fortfarande 0.
+    try:
+        now_q = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+    except (AttributeError, ValueError):
+        now_q = now
+
     for t, ts in enumerate(timestamps):
-        if start <= ts < end and ts >= now:
+        if start <= ts < end and ts >= now_q:
             ev[t] = kw
     return ev

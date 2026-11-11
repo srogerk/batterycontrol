@@ -13,13 +13,13 @@ import time
 import datetime
 import zoneinfo
 
-sys.path.append("/workspace/projects/Batteristyrning - effektavgift")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import src.forecast as forecast_module
 import src.optimizer_v2 as optimizer_module
 import src.generate_plot as plot_module
 import src.generate_web as web_module
 
-LOG_FILE = "/workspace/projects/Batteristyrning - effektavgift/src/batterycontrol.log"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "batterycontrol.log")
 
 def log(msg):
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -175,9 +175,13 @@ def main():
                 client.call_service("chargeamps", "set_max_current", {**ca_payload, "max_current": 8})
                 client.call_service("chargeamps", "enable", ca_payload)
             else:
-                log("[ELBIL v2] Ingen laddning planerad denna kvart: säkerställer att laddboxen är avstängd")
+                # Kvarten ligger utanför det bokade blocket (före start eller efter
+                # slut) — då ska boxen vara av, annars fortsätter bilen ladda efter
+                # blockets slut.
+                log("[ELBIL v2] Ingen laddning planerad denna kvart: laddboxen avstängd")
                 client.call_service("chargeamps", "disable", ca_payload)
-        elif is_tariff_window:
+        else:
+            # Ingen order: se till att boxen inte står och laddar.
             client.call_service("chargeamps", "disable", ca_payload)
 
     # Uppdatera status-sensor i HA
