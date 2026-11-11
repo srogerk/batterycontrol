@@ -180,9 +180,11 @@ def main():
                 # blockets slut.
                 log("[ELBIL v2] Ingen laddning planerad denna kvart: laddboxen avstängd")
                 client.call_service("chargeamps", "disable", ca_payload)
-        else:
-            # Ingen order: se till att boxen inte står och laddar.
-            client.call_service("chargeamps", "disable", ca_payload)
+        # Ingen order: rör inte laddboxen. Manual laddning ska fungera ostört.
+        #
+        # Säkerhetsspärren som låg här ("elif is_tariff_window: chargeamps.disable")
+        # togs bort 2026-11-11 på Rogers begäran. Den stängde av boxen oavsett om
+        # någon order fanns, och blockerade därmed manuell laddning.
 
     # Uppdatera status-sensor i HA
     client.post_state(
