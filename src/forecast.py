@@ -155,12 +155,33 @@ def main():
     ev_power_state = client.get_state("sensor.ev_power")
     outdoor_temp_state = client.get_state("sensor.aktuell_utetemperatur_bt1_40004")
 
-    actual_load_w = float(actual_load_state.get("state", 1500)) if actual_load_state else 1500.0
+    # Läs sensorns värde robust. HA rapporterar "unknown"/"unavailable" när en
+    # enhet tappar kontakt (t.ex. NIBE-BT1 en kort stund), och float() på den
+    # strängen kastade ValueError som dödade HELA kvartskörningen via
+    # `return` i run_loop.py - mitt i effekttariffönstret, utan styrning.
+    # En trasig givare ska ge ett rimligt default, inte stoppa optimeringen.
+    def _sensor_float(state, default):
+        if not state:
+            return default
+        raw = state.get("state")
+        if raw is None:
+            return default
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            print(f"VARNING: sensorn {state.get('entity_id', '?')} hade olasbart varde "
+                  f"{raw!r} - anvander default {default}")
+            return default
+        if value != value or value in (float("inf"), float("-inf")):   # NaN/inf
+            return default
+        return value
+
+    actual_load_w = _sensor_float(actual_load_state, 1500.0)
     # sensor.ev_power is in kW
-    ev_power_kw = float(ev_power_state.get("state", 0)) if (ev_power_state and ev_power_state.get("state") not in ["unknown", "unavailable"]) else 0.0
+    ev_power_kw = _sensor_float(ev_power_state, 0.0)
     net_house_load_kw = max(0.1, (actual_load_w / 1000.0) - ev_power_kw)
 
-    outdoor_temp = float(outdoor_temp_state.get("state", 10.0)) if outdoor_temp_state else 10.0
+    outdoor_temp = _sensor_float(outdoor_temp_state, 10.0)
 
     # 2. Adaptiv felberäkning (EWMA / I-del)
     last_pred = state.get("last_predicted_kw", net_house_load_kw)
@@ -180,16 +201,27 @@ def main():
     tz_local = zoneinfo.ZoneInfo("Europe/Stockholm")
     temp_by_hour = {}
     for item in smhi_hourly:
-        dt_str = item["datetime"]
+        dt_str = item.get("datetime")
+        if not dt_str:
+            continue
         dt = datetime.datetime.fromisoformat(dt_str).astimezone(tz_local)
-        temp_by_hour[dt.strftime("%Y-%m-%d %H")] = float(item["temperature"])
+        # Ett enskilt trasigt vardeprognospunkt far inte stoppa hela korningen.
+        try:
+            temp_by_hour[dt.strftime("%Y-%m-%d %H")] = float(item["temperature"])
+        except (KeyError, TypeError, ValueError):
+            print(f"VARNING: SMHI-punkt {dt_str} hade inget giltigt temperaturvarde - hoppar over")
 
     # Bygg Solcast lookup per halvtimme i lokal svensk tid
     solcast_by_period = {}
     for item in solcast_raw:
-        dt_str = item["period_start"]
+        dt_str = item.get("period_start")
+        if not dt_str:
+            continue
         dt = datetime.datetime.fromisoformat(dt_str).astimezone(tz_local)
-        solcast_by_period[dt.strftime("%Y-%m-%d %H:%M")] = float(item["pv_estimate"])
+        try:
+            solcast_by_period[dt.strftime("%Y-%m-%d %H:%M")] = float(item["pv_estimate"])
+        except (KeyError, TypeError, ValueError):
+            print(f"VARNING: Solcast-punkt {dt_str} hade inget giltigt pv_estimate - hoppar over")
 
     # 4. Skapa 192 kvartar (48 h) i lokal svensk tid
     now = datetime.datetime.now(tz_local)
