@@ -1,6 +1,6 @@
 # Batterycontrol – Prediktiv och kostnadsoptimal batteristyrning
 
-**Batterycontrol** är ett system för prediktiv, rullande optimering (MPC – Model Predictive Control) av hembatteri mot dynamiska elpriser och effekttariffer. Systemet samverkar med **Home Assistant** och styr en **Solis hybridväxelriktare** via Modbus.
+**Batterycontrol** är ett system för prediktiv, rullande ekonomisk optimering (MPC – Model Predictive Control) av elinköp vid dynamiska elpriser och effekttariffer. Systemet styr effektflöden mellan elnätet, ett hembatteri, solceller, och huslast. Systemet samverkar med **Home Assistant** och styr en **Solis hybridväxelriktare** via Modbus.
 
 ---
 
@@ -9,15 +9,18 @@
 Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall över en **dynamisk planeringshorisont** (upp till 36 timmar beroende på känd Nord Pool-data, anpassat till midnatt idag före kl 13:00 och midnatt imorgon efter kl 13:00 med terminalvärde). Det körs cykliskt var 15:e minut via cron och utför följande huvudfunktioner:
 
 ### 1.1 Huvudfunktioner
-- **Spotprisarbitrage:** Laddar batteriet under lågprisperioder och urladdar under dyra perioder. Urladdning sker mot hushållet, och ersätter alltså inköp av el med ett högre pris. Vid beräkningen om laddning/urladdning är lönsam och skall genomföras tas hänsyn tas till batteriets slitagekostnad och verkningsgrad vid laddning/urladdning.
+- **Spotprisarbitrage:** Laddar batteriet under lågprisperioder och urladdar under dyra perioder. Urladdning sker mot huslasten, och ersätter alltså inköp av el med ett högre pris. Vid beräkningen om laddning/urladdning är lönsam och skall genomföras tas hänsyn tas till batteriets slitagekostnad och verkningsgrad vid laddning/urladdning.
 - **Effektavgiftsminimering:** Optimerar laddning och urladdning mot nätägarens (Göteborg Energi) prismodell för effektavgift. Prismodellen är utformad som följer: Priset beräknas på medelvärdet av de tre högsta tim-medel-effekt-topperna under effekttariff-fönstret, på olika dygn, under 1 månad. Effekttariffönstert är 7 - 20 helgfria vardagar mellan 1 november och sista mars.
-- **Mjuk och sammanhängande batteriladdning:** Strävar efter att hålla nere på-av frekvensen för laddning av batteriet genom att utföra laddningarna i sammanhängande block, och strävar efter att minska förluster och slitage på batteriet genom att sänka toppeffekter och ladda längre tid i stället. Denna funktion justerar den optimala planen för batteriladdning och urladdning, och medför alltså en kostnad pga utebliven vinst. 
-- **Adaptiv last- och produktionsprognos:** Bygger en rullande prognos (upp till 48h horisont) för hushållets elbehov och solproduktion:
+- **Mjuk och sammanhängande batteriladdning:** Optimeraren strävar efter att hålla nere på-av frekvensen för laddning av batteriet genom att utföra laddningarna i sammanhängande block, och att minska förluster och slitage på batteriet genom att sänka toppeffekter och öka tiden för laddning. Denna funktion justerar den optimala planen för batteriladdning och urladdning, och medför alltså en kostnad pga utebliven vinst.
+- **Adaptiv last- och produktionsprognos:** Optimeraren bygger en rullande prognos (upp till 48h horisont) för hushållets elbehov och solproduktion:
   - Solprognos via Solcast.
   - Värmebehovsmodellering kopplad mot SMHI:s temperaturprognos och husets värmepumpskoefficienter (NIBE BT1).
   - Dynamisk felkorrigering (EWMA) mot momentant uppmätt huslast för att snabbt fånga avvikelser.
-- **Solis-anpassad laddreglering:** I stället för on/off-pulser med maxeffekt fördelas nödvändig laddenergi jämnt över hela 15-minutersintervall genom dynamisk beräkning och rampning av strömbörvärdet (A) baserat på batterispänning.
-
+- **Samplanerad elbilsladdning (10 kWh-beställning):**
+  - Styrs via en ren knapp i Home Assistant (`input_boolean.ev_charge_order_10kwh`, "Ladda elbil 10 kWh innan 07:00").
+  - Vid aktivering identifierar LP-optimeraren det globalt billigaste sammanhängande 2-timmarsblocket (8 kvartar à 5,5 kW = 11 kWh) fram till kl 07:00.
+  - Elbilslasten läggs in i huslastprofilen så att hembatteriet samplaneras: nätimporten tar billaddningen under nattens djupaste prisdalar utan att hembatteriet töms in i bilen, samtidigt som hembatteriet säkerställs full laddning (100 %) inför effekttariffstart kl 07:00.
+  - Styr Charge Amps Halo laddbox autonomt (`chargeamps.enable` under blocket, `chargeamps.disable` övrig tid och alltid under aktiv effekttariff).
 ### 1.2 Stödjande funktioner
 - **Dynamiskt effekttak ($P_{\text{dag}}$):** Minimerar effektavgiften genom att begränsa toppeffekten för nät-importen under högpristid. Detta görs genom att införa ett dygnsoptimerad takvariabel $P_{\text{dag}}$. Nödvändig nätimport smetas därmed ut helt platt över alla 15-mintersperioder mellan 07:00 och 20:00.
 - **Säsongsgolv för effekttak:** Förhindrar att optimeraren cyklar hembatteriet i onödan på grund av orealistiskt lågt målvärde för effektavgiftsminimeringen. Optimeraren försöker hela tiden "inte gå över tidigare effekttopp", det så kallade taket. Med detta golv ändrar optimerarens strategi till att inte gå över den största av "förväntad topp för månaden (=golvet) eller tidigare effekttopp". Taket $P_{\text{dag}}$ har alltså ett hårt nedre golv på 1,30 kW (nov, feb, mar) och 1,60 kW (dec, jan).
@@ -38,11 +41,6 @@ Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall öv
   - Fram till kl 19:00 hålls minst 1,0 kWh (ca 5 % SOC) i reserv för att parera transienta hushållstoppar (1,0 kWh under en kvart motsvarar 4 kW kontinuerlig marginal).
   - Mellan kl 19:00 och 20:00 släpps reserven fri ner mot batteriets hårdvarugolv (0 kWh användbart).
 - **Huvudsäkringsskydd:** Strikt bivillkor i optimeraren som förhindrar att timmedeleffekten från nätet någonsin överskrider abonnemangstaket på 14 kW.
-- **Samplanerad elbilsladdning (10 kWh-beställning):**
-  - Styrs via en ren knapp i Home Assistant (`input_boolean.ev_charge_order_10kwh`, "Ladda elbil 10 kWh innan 07:00").
-  - Vid aktivering identifierar LP-optimeraren det globalt billigaste sammanhängande 2-timmarsblocket (8 kvartar à 5,5 kW = 11 kWh) fram till kl 07:00.
-  - Elbilslasten läggs in i huslastprofilen så att hembatteriet samplaneras: nätimporten tar billaddningen under nattens djupaste prisdalar utan att hembatteriet töms in i bilen, samtidigt som hembatteriet säkerställs full laddning (100 %) inför effekttariffstart kl 07:00.
-  - Styr Charge Amps Halo laddbox autonomt (`chargeamps.enable` under blocket, `chargeamps.disable` övrig tid och alltid under aktiv effekttariff).
 - **Strikt lokal tidszonshantering (`Europe/Stockholm`):**
   - Alla tidsstämplar, kvartsintervall och timvillkor (07:00–20:00) hanteras explicit i svensk lokal tid (CET/CEST), vilket garanterar exakt synkronisering mot nätägarens tariffer och SMHI/Solcast/Nord Pool utan UTC-förskjutningar.
 
