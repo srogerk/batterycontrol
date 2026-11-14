@@ -1,49 +1,79 @@
 # Batterycontrol – Prediktiv och kostnadsoptimal batteristyrning
 
-**Batterycontrol** är en Home Assistant-add-on för ekonomiskt optimerad styrning av ett system med hembatteri, solpaneler och elbilsladdare. Systemet minimerar två kostnader samtidigt: inköpspriset på spotmarknaden och nätägarens effektavgift (baserad på månadens tre högsta timmedeleffekter). Styrningen är prediktiv (MPC — Model Predictive Control): var 15:e minut löses ett linjärt optimeringsproblem över den kända pris- och prognoshorisonten, och planens första kvart verkställs mot en **Solis S6-EH3P** hybridväxelriktare och en **Charge Amps**-laddbox via Home Assistants `solis_modbus`- respektive `chargeamps`-integration.
+**Batterycontrol** är en Home Assistant-add-on för ekonomiskt optimerad styrning av ett system med hembatteri, solpaneler och elbilsladdare. Systemet minimerar två kostnader samtidigt: inköpspriset på spotmarknaden och nätägarens effektavgift (avgiftsmodell: månadens tre högsta timmedeleffekter). Optimeringen baseras på prognoser för solproduktion och för hushållförbrukning av el. Styrningen är prediktiv (MPC — Model Predictive Control): var 15:e minut löses ett linjärt optimeringsproblem över den kända pris- och prognoshorisonten, och planens första kvart verkställs mot en **Solis S6-EH3P** hybridväxelriktare och en **Charge Amps**-laddbox via Home Assistants `solis_modbus`- respektive `chargeamps`-integration.
+
 ---
 
 ## 1. Systembeskrivning och funktionalitet
 
-Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall över en **dynamisk planeringshorisont** (upp till 36 timmar beroende på känd Nord Pool-data, anpassat till midnatt idag före kl 13:00 och midnatt imorgon efter kl 13:00 med terminalvärde). Det körs cykliskt var 15:e minut via cron och utför följande huvudfunktioner:
+Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall över en **dynamisk planeringshorisont** (upp till 36 timmar beroende på känd Nord-Pool-data, anpassat till midnatt idag före kl 13:00 och midnatt imorgon efter kl 13:00 med terminalvärde). Det körs cykliskt var 15:e minut och utför följande huvudfunktioner:
 
 ### 1.1 Huvudfunktioner
-- **Spotprisarbitrage:** Laddar batteriet under lågprisperioder och urladdar under dyra perioder. Urladdning sker mot huslasten, och ersätter alltså inköp av el med ett högre pris. Vid beräkningen om laddning/urladdning är lönsam och skall genomföras tas hänsyn till batteriets slitagekostnad och verkningsgrad vid laddning/urladdning.
-- **Effektavgiftsminimering:** Optimerar laddning och urladdning mot nätägarens (Göteborg Energi) prismodell för effektavgift. Prismodellen: priset beräknas på medelvärdet av de tre högsta tim-medel-effekt-topperna under effekttariff-fönstret, på olika dygn, under 1 månad. Effekttariffönstert är 7:00 - 20:00 helgfria vardagar mellan 1 november och sista mars.
-- **Mjuk och sammanhängande batteriladdning:** Optimeraren strävar efter att hålla nere antalet på/av cykler för laddning av batteriet genom att utföra laddningarna i sammanhängande block. och att minska förluster och slitage på batteriet genom att sänka toppeffekter och öka tiden för laddning. Denna funktion justerar den optimala planen för batteriladdning och urladdning, och medför alltså en kostnad pga utebliven vinst.
-- **Adaptiv last- och produktionsprognos:** Optimeraren bygger en rullande prognos (upp till 48h horisont) för hushållets elbehov och solproduktion:
+#### 1.1.1 Spotprisarbitrage
+Laddar batteriet när spotpriset är lågt, och laddar ur när spotpriset är högt. Urladdning sker mot huslasten och även mot nätet om det är lönsamt. Vid beräkningen om laddning/urladdning är lönsam och skall genomföras tas hänsyn till batteriets slitagekostnad och verkningsgrad för laddning/urladdning.
+#### 1.1.2 Effektavgiftsminimering
+Optimerar laddning och urladdning mot nätägarens (Göteborg Energi) prismodell för effektavgift. Prismodellen: priset beräknas på medelvärdet av de tre högsta tim-medel-effekt-topperna under effekttariff-fönstret, på olika dygn, under 1 månad. Effekttariffönstert är 7:00 - 20:00 helgfria vardagar mellan 1 november och sista mars.
+#### 1.1.3 Mjuk och sammanhängande batteriladdning
+Begränsar förluster och slitage på batteriet. Detta görs genom att sänka toppeffekter och hålla nere antalet på/av cykler vid laddning av batteriet. Denna funktion ger en avvikelse från den absolut optimala planen för batteriladdning, och medför alltså en (marginellt) minskad vinst.
+#### 1.1.4 Samplanerad billaddning (16 kWh-beställning)
+Erbjuder "bokning" pris-optimal billaddning under kommande natt. Laddning "bokas" via en knapp i Home Assistant, och LP-optimeraren identifierar då det billigaste sammanhängande tidblocket, och laddar sedan bilen när tiden är inne.
+
+#### 1.1.5 Huvudsäkringsskydd
+Strikt bivillkor i optimeraren som förhindrar att timmedeleffekten från nätet någonsin överskrider abonnemangstaket på 14 kW
+
+### 1.2 Stödjande funktioner
+#### 1.2.1 Adaptiv last- och produktionsprognos
+Optimeraren bygger en rullande prognos (upp till 48h horisont) för hushållets elbehov och solproduktion:
   - Solprognos via Solcast.
   - Värmebehovsmodellering kopplad mot SMHI:s temperaturprognos och husets värmepumpskoefficienter (NIBE BT1).
   - Dynamisk felkorrigering (EWMA) mot momentant uppmätt huslast för att snabbt fånga avvikelser.
-- **Samplanerad elbilsladdning (10 kWh-beställning):**
-  - Styrs via en ren knapp i Home Assistant (`input_boolean.ev_charge_order_10kwh`, "Ladda elbil 10 kWh innan 07:00").
-  - Vid aktivering identifierar LP-optimeraren det globalt billigaste sammanhängande 2-timmarsblocket (8 kvartar à 5,5 kW = 11 kWh) fram till kl 07:00.
-  - Elbilslasten läggs in i huslastprofilen så att hembatteriet samplaneras: nätimporten tar billaddningen under nattens djupaste prisdalar utan att hembatteriet töms in i bilen, samtidigt som hembatteriet säkerställs full laddning (100 %) inför effekttariffstart kl 07:00.
-  - Styr Charge Amps Halo laddbox autonomt (`chargeamps.enable` under blocket, `chargeamps.disable` övrig tid och alltid under aktiv effekttariff).
-### 1.2 Stödjande funktioner
-- **Dynamiskt effekttak ($P_{\text{dag}}$):** Minimerar effektavgiften genom att begränsa toppeffekten för nät-importen under högpristid. Detta görs genom att införa ett dygnsoptimerad takvariabel $P_{\text{dag}}$. Nödvändig nätimport smetas därmed ut helt platt över alla 15-mintersperioder mellan 07:00 och 20:00.
-- **Säsongsgolv för effekttak:** Förhindrar att optimeraren cyklar hembatteriet i onödan på grund av orealistiskt lågt målvärde för effektavgiftsminimeringen. Optimeraren försöker hela tiden "inte gå över tidigare effekttopp", det så kallade taket. Med detta golv ändrar optimerarens strategi till att inte gå över den största av "förväntad topp för månaden (=golvet) eller tidigare effekttopp". Taket $P_{\text{dag}}$ har alltså ett hårt nedre golv på 1,30 kW (nov, feb, mar) och 1,60 kW (dec, jan).
-- **Fri spotoptimering under taket:** Inom ramen för $P_{\text{dag}}$ råder verkligt spotpris utan artificiella påslag, vilket ger frihet för spotarbitrage och optimal lastfördelning.
-- **Fri Self-Use dagtid (Parering av transienter):** Under effekttariff (07:00–20:00) hålls `backup_soc` strikt på 15 % basgolv. Växelriktaren tillåts därmed parera momentana huslaster (kaffebryggare, ugn, micro) via Self-Use så att korta laster aldrig slår igenom som nättoppar.
-- **Rädda timmen-vakt:** I kvart 2, 3 och 4 av varje klocktimme under effekttariffen kontrolleras ackumulerad energi från nätmätaren (`sensor.solis_s6_eh1p_meter_total_active_energy_from_grid`). Om timmen riskerar att överskrida måltaket minskas tvingas urladdning fram för att skydda timmedelvärdet.
-- **Solis-anpassad laddreglering:** I stället för on/off-pulser med maxeffekt fördelas nödvändig laddenergi jämnt över hela 15-minuterskvarten genom dynamisk beräkning och rampning av strömbörvärdet (A) baserat på batterispänning.
-  - **Stegvis progressiv laddeffekt (5 trappsteg):** För att undvika att optimeraren rusar till 10 kW för marginella prisdifferenser modelleras laddeffekten som en konvex styckvis linjär funktion:
+
+#### 1.2.2 Säsongsgolv för effekttak
+Förhindrar att optimeraren cyklar hembatteriet i onödan på grund av orealistiskt lågt målvärde för effektavgiftsminimeringen. Optimeraren försöker hela tiden "inte gå över tidigare effekttopp", det så kallade taket. Med detta golv ändrar optimerarens strategi till att inte gå över den största av "förväntad topp för månaden (=golvet) eller tidigare effekttopp". Taket $P_{\text{dag}}$ har alltså ett hårt nedre golv på 1,30 kW (nov, feb, mar) och 1,60 kW (dec, jan).
+  
+#### 1.2.3 Rädda timmen-vakt
+I kvart 2, 3 och 4 av varje klocktimme under effekttariffen kontrolleras ackumulerad energi från nätmätaren. Om timmen riskerar att överskrida måltaket minskas minskas måltaket för nästa planerade kvart för att skydda timmedelvärdet.
+
+#### 1.2.4 Kontinuitetshysteres
+Om laddning redan pågick föregående kvart ges innevarande kvart ($t=0$) en rabatt på 5 öre/kWh. Detta motverkar fladder ('chatter') och hindrar omplaneringen från att avbryta ett påbörjat laddblock för små marginella prisskillnader.
+
+#### 1.2.5 Växlingsdämpning
+En linjär straffterm på $|P_t - P_{t-1}|$ mellan på varandra följande kvartar binder samman laddningen till stabila, sammanhängande tidsfönster.
+
+---
+
+### 1.3 Implementationsdetaljer 
+#### 1.3.1 Dynamiskt effekttak
+Minimerar effektavgiften genom att begränsa toppeffekten för nät-importen under högpristid. Detta görs genom att införa ett dygnsoptimerad takvariabel $P_{\text{dag}}$. Nödvändig nätimport smetas därmed ut helt platt över alla 15-mintersperioder mellan 07:00 och 20:00.
+
+#### 1.3.2 Fri spotoptimering under taket
+Inom ramen för $P_{\text{dag}}$ råder verkligt spotpris utan artificiella påslag, vilket ger frihet för spotarbitrage och optimal lastfördelning.
+
+#### 1.3.3 Fri Self-Use dagtid (Parering av transienter)
+Under effekttariff (07:00–20:00) hålls `backup_soc` strikt på 15 % basgolv. Växelriktaren tillåts därmed parera momentana huslaster (kaffebryggare, ugn, micro) via Self-Use så att korta laster aldrig slår igenom som nättoppar.
+
+#### 1.3.4 Solis-anpassad laddreglering
+I stället för on/off-pulser med maxeffekt fördelas nödvändig laddenergi jämnt över hela 15-minuterskvarten genom dynamisk beräkning och rampning av strömbörvärdet (A) baserat på batterispänning.
+
+#### 1.3.5 Stegvis progressiv laddeffekt (5 trappsteg)
+För att undvika att optimeraren rusar till 10 kW för marginella prisdifferenser modelleras laddeffekten som en konvex styckvis linjär funktion:
     - *Steg 1 (0–4 kW):* Mjuk basladdning utan extra påslag (0,00 kr/kWh).
     - *Steg 2 (4–6 kW):* Moderat laddeffekt (+0,08 kr/kWh påslag).
     - *Steg 3 (6–8 kW):* Högre laddeffekt (+0,22 kr/kWh påslag).
     - *Steg 4 (8–10 kW):* Hög laddeffekt (+0,50 kr/kWh påslag, reserveras för kraftiga prisdippar).
     - *Steg 5 (10+ kW):* Effektspik över 10 kW (+100 % påslag av spotpriset, d.v.s. dubbelt pris, vilket effektivt förhindrar nätspikar mot huvudsäkringen).
-  - **Kontinuitetshysteres (`c_hysteresis` = 5 öre/kWh):** Om laddning redan pågick föregående kvart ges innevarande kvart ($t=0$) en rabatt på 5 öre/kWh. Detta motverkar fladder ('chatter') och hindrar omplaneringen från att avbryta ett påbörjat laddblock för små marginella prisskillnader.
-  - **Växlingsdämpning (`c_switch` = 3 öre/kWh ändring):** En linjär straffterm på $|P_t - P_{t-1}|$ mellan på varandra följande kvartar binder samman laddningen till stabila, sammanhängande tidsfönster.
-- **Urladdningsspärr via `backup_soc`:** När optimeraren finner det mest lönsamt att spara lagrad energi till senare dyrare timmar (eller inför morgonens effekttaxa) spärras växelriktarens Self-Use autonomt genom att sätta `backup_soc` till aktuell SOC. När urladdning planeras sänks golvet till normal basreserv (15 %).
-- **Dynamisk reservhantering:**
-  - Fram till kl 19:00 hålls minst 1,0 kWh (ca 5 % SOC) i reserv för att parera transienta hushållstoppar (1,0 kWh under en kvart motsvarar 4 kW kontinuerlig marginal).
-  - Mellan kl 19:00 och 20:00 släpps reserven fri ner mot batteriets hårdvarugolv (0 kWh användbart).
-- **Huvudsäkringsskydd:** Strikt bivillkor i optimeraren som förhindrar att timmedeleffekten från nätet någonsin överskrider abonnemangstaket på 14 kW.
-- **Strikt lokal tidszonshantering (`Europe/Stockholm`):**
-  - Alla tidsstämplar, kvartsintervall och timvillkor (07:00–20:00) hanteras explicit i svensk lokal tid (CET/CEST), vilket garanterar exakt synkronisering mot nätägarens tariffer och SMHI/Solcast/Nord Pool utan UTC-förskjutningar.
 
----
+#### 1.3.6 Urladdningsspärr via `backup_soc`
+När optimeraren finner det mest lönsamt att spara lagrad energi till senare dyrare timmar (eller inför morgonens effekttaxa) spärras växelriktarens Self-Use autonomt genom att sätta `backup_soc` till aktuell SOC. När urladdning planeras sänks golvet till normal basreserv (15 %).
+
+#### 1.3.6 Dynamisk reservhantering
+Fram till kl 19:00 hålls minst 1,0 kWh (ca 5 % SOC) i reserv för att parera transienta hushållstoppar (1,0 kWh under en kvart motsvarar 4 kW kontinuerlig marginal). Mellan kl 19:00 och 20:00 släpps reserven fri ner mot batteriets hårdvarugolv (0 kWh användbart).
+
+#### 1.3.7 Strikt lokal tidszonshantering (`Europe/Stockholm`):**
+Alla tidsstämplar, kvartsintervall och timvillkor (07:00–20:00) hanteras explicit i svensk lokal tid (CET/CEST), vilket garanterar exakt synkronisering mot nätägarens tariffer och SMHI/Solcast/Nord Pool utan UTC-förskjutningar.
+
+#### 1.3.8 Billaddning
+Styr ChargeAmps Halo laddbox autonomt. Vid "bokning" identifieras det optimala 3-timmarsblocket (12 kvartar à 5,5 kW = 16,5 kWh) fram till kl 07:00. Elbilslasten läggs in i huslastprofilen så att hembatteriet samplaneras: nätimporten tar billaddningen under nattens djupaste prisdalar utan att hembatteriet töms in i bilen, samtidigt som hembatteriet säkerställs optimal laddning inför effekttariffstart kl 07:00.
 
 ## 2. Arkitektur och logik
 
