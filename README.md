@@ -16,10 +16,10 @@ Optimerar laddning och urladdning mot nätägarens (Göteborg Energi) prismodell
 #### 1.1.3 Mjuk och sammanhängande batteriladdning
 Begränsar förluster och slitage på batteriet. Detta görs genom att sänka toppeffekter och hålla nere antalet på/av cykler vid laddning av batteriet. Denna funktion ger en avvikelse från den absolut optimala planen för batteriladdning, och medför alltså en (marginellt) minskad vinst.
 #### 1.1.4 Samplanerad billaddning (16 kWh-beställning)
-Erbjuder "bokning" pris-optimal billaddning under kommande natt. Laddning "bokas" via en knapp i Home Assistant, och LP-optimeraren identifierar då det billigaste sammanhängande tidblocket, och laddar sedan bilen när tiden är inne.
+Erbjuder bokning av pris-optimal billaddning under kommande natt. Laddning bokas via en knapp i Home Assistant, och LP-optimeraren identifierar då det billigaste sammanhängande tidblocket, och laddar sedan bilen när tiden är inne.
 
 #### 1.1.5 Huvudsäkringsskydd
-Strikt bivillkor i optimeraren som förhindrar att timmedeleffekten från nätet någonsin överskrider abonnemangstaket på 14 kW
+Förhindrar att timmedeleffekten från nätet överskrider abonnemangstaket på 14 kW
 
 ### 1.2 Stödjande funktioner
 #### 1.2.1 Adaptiv last- och produktionsprognos
