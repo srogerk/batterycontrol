@@ -17,28 +17,27 @@ Optimerar laddning och urladdning mot nätägarens (Göteborg Energi) prismodell
 Begränsar förluster och slitage på batteriet. Detta görs genom att sänka toppeffekter och hålla nere antalet på/av cykler vid laddning av batteriet. Denna funktion ger en avvikelse från den absolut optimala planen för batteriladdning, och medför alltså en (marginellt) minskad vinst.
 #### 1.1.4 Samplanerad billaddning (16 kWh-beställning)
 Erbjuder bokning av pris-optimal billaddning under kommande natt. Laddning bokas via en knapp i Home Assistant, och LP-optimeraren identifierar då det billigaste sammanhängande tidblocket, och laddar sedan bilen när tiden är inne.
-
 #### 1.1.5 Huvudsäkringsskydd
-Förhindrar att timmedeleffekten från nätet överskrider abonnemangstaket på 14 kW
+Förhindrar att timmedeleffekten från nätet överskrider abonnemangstaket på 14 kW. 
 
 ### 1.2 Stödjande funktioner
 #### 1.2.1 Adaptiv last- och produktionsprognos
-Optimeraren bygger en rullande prognos (upp till 48h horisont) för hushållets elbehov och solproduktion:
+Optimeraren bygger en rullande prognos (upp till ca 35h horisont) för hushållets elbehov och solproduktion:
   - Solprognos via Solcast.
   - Värmebehovsmodellering kopplad mot SMHI:s temperaturprognos och husets värmepumpskoefficienter (NIBE BT1).
   - Dynamisk felkorrigering (EWMA) mot momentant uppmätt huslast för att snabbt fånga avvikelser.
 
 #### 1.2.2 Säsongsgolv för effekttak
-Förhindrar att optimeraren cyklar hembatteriet i onödan på grund av orealistiskt lågt målvärde för effektavgiftsminimeringen. Optimeraren försöker hela tiden "inte gå över tidigare effekttopp", det så kallade taket. Med detta golv ändrar optimerarens strategi till att inte gå över den största av "förväntad topp för månaden (=golvet) eller tidigare effekttopp". Taket $P_{\text{dag}}$ har alltså ett hårt nedre golv på 1,30 kW (nov, feb, mar) och 1,60 kW (dec, jan).
+Förhindrar att optimeraren cyklar hembatteriet i onödan på grund av orealistiskt lågt målvärde för effektavgiftsminimeringen. Optimeraren försöker hela tiden "inte gå över tidigare effekttopp", det så kallade taket. Med detta golv ändrar optimerarens strategi till att inte gå över den största av "förväntad topp för månaden (=golvet för taket) eller tidigare effekttopp". Taket har alltså ett hårt nedre golv på 1,30 kW (nov, feb, mar) och 1,60 kW (dec, jan).
   
-#### 1.2.3 Rädda timmen-vakt
-I kvart 2, 3 och 4 av varje klocktimme under effekttariffen kontrolleras ackumulerad energi från nätmätaren. Om timmen riskerar att överskrida måltaket minskas minskas måltaket för nästa planerade kvart för att skydda timmedelvärdet.
+#### 1.2.3 Tim-medeleffekt-optimering
+Under effekt-tariff-tid läser optimeraren av importerad energi under innevarande timma och anpassar planen så att medel-effekten under hela timmen skall hållas under måltaket.
 
 #### 1.2.4 Kontinuitetshysteres
-Om laddning redan pågick föregående kvart ges innevarande kvart ($t=0$) en rabatt på 5 öre/kWh. Detta motverkar fladder ('chatter') och hindrar omplaneringen från att avbryta ett påbörjat laddblock för små marginella prisskillnader.
+Om laddning redan pågick föregående kvart ges innevarande kvart en rabatt på på inköpsåriset. Detta motverkar fladder ('chatter') och hindrar omplaneringen från att avbryta ett påbörjat laddblock för små marginella prisskillnader.
 
 #### 1.2.5 Växlingsdämpning
-En linjär straffterm på $|P_t - P_{t-1}|$ mellan på varandra följande kvartar binder samman laddningen till stabila, sammanhängande tidsfönster.
+En linjär straffterm mellan på varandra följande kvartar binder samman laddningen till stabila, sammanhängande tidsfönster.
 
 ---
 
@@ -66,18 +65,18 @@ För att undvika att optimeraren rusar till 10 kW för marginella prisdifferense
 #### 1.3.6 Urladdningsspärr via `backup_soc`
 När optimeraren finner det mest lönsamt att spara lagrad energi till senare dyrare timmar (eller inför morgonens effekttaxa) spärras växelriktarens Self-Use autonomt genom att sätta `backup_soc` till aktuell SOC. När urladdning planeras sänks golvet till normal basreserv (15 %).
 
-#### 1.3.6 Dynamisk reservhantering
+#### 1.3.7 Dynamisk reservhantering
 Fram till kl 19:00 hålls minst 1,0 kWh (ca 5 % SOC) i reserv för att parera transienta hushållstoppar (1,0 kWh under en kvart motsvarar 4 kW kontinuerlig marginal). Mellan kl 19:00 och 20:00 släpps reserven fri ner mot batteriets hårdvarugolv (0 kWh användbart).
 
-#### 1.3.7 Strikt lokal tidszonshantering (`Europe/Stockholm`):**
+#### 1.3.8 Strikt lokal tidszonshantering (`Europe/Stockholm`):**
 Alla tidsstämplar, kvartsintervall och timvillkor (07:00–20:00) hanteras explicit i svensk lokal tid (CET/CEST), vilket garanterar exakt synkronisering mot nätägarens tariffer och SMHI/Solcast/Nord Pool utan UTC-förskjutningar.
 
-#### 1.3.8 Billaddning
+#### 1.3.9 Billaddning
 Styr ChargeAmps Halo laddbox autonomt. Vid "bokning" identifieras det optimala 3-timmarsblocket (12 kvartar à 5,5 kW = 16,5 kWh) fram till kl 07:00. Elbilslasten läggs in i huslastprofilen så att hembatteriet samplaneras: nätimporten tar billaddningen under nattens djupaste prisdalar utan att hembatteriet töms in i bilen, samtidigt som hembatteriet säkerställs optimal laddning inför effekttariffstart kl 07:00.
 
 ## 2. Arkitektur och logik
 
-Systemet är uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lager:
+Systemet ä  r uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lager:
 
 ```
                   [ Home Assistant REST API ]
@@ -86,7 +85,7 @@ Systemet är uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lager:
                  |             |             |
                  v             v             v
        +------------------+    |    +-------------------+
-       |   forecast.py    |    |    |   optimizer.py    |
+       |   forecast.py    |    |    |   optimizer_v2.py |
        | Adaptiv last- &  |    |    | Global dynamisk   |
        | solprognos       |--->|--->| LP (SciPy HiGHS)  |
        +------------------+    |    +-------------------+
@@ -104,7 +103,7 @@ Systemet är uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lager:
 ```
 
 1. **`src/forecast.py` (Prognosmotor):** Hämtar historisk baslast, väder- och solprognos, applicerar värmekoefficienter för utetemperatur och beräknar en adaptiv bias mot aktuell förbrukning. Skickar prognosvektorer till Home Assistant (anpassas dynamiskt av optimeraren till kända Nord Pool-timmar).
-2. **`src/optimizer.py` (Global LP-lösare):** Formulerar ett linjärprogrammeringsproblem (LP) med dynamisk horisont T kvartar (upp till 36 timmar kända Nord Pool-priser) och 13 variabler per kvart (inklusive 5 progressiva laddeffektsteg och rampningsvariabler). Lösaren (`scipy.optimize.linprog` med HiGHS-metoden) minimerar total nettokostnad under givna bivillkor (SOC-dynamik, batterigränser, effekttak, säkringsgräns, kontinuitetshysteres och terminalvärde). Lösningen tar ca 0,05 s.
+2. **`src/optimizer.py` (Global LP-lösare):** Formulerar ett linjärprogrammeringsproblem (LP) med dynamisk horisont T kvartar (upp till 36 timmar kända Nord Pool-priser) och 11 variabler per kvart (inklusive 5 progressiva laddeffektsteg och rampningsvariabler). Lösaren (`scipy.optimize.linprog` med HiGHS-metoden) minimerar total nettokostnad under givna bivillkor (SOC-dynamik, batterigränser, effekttak, säkringsgräns, kontinuitetshysteres och terminalvärde). Lösningen tar ca 0,05 s.
 3. **`src/run_loop.py` (Exekveringsloop):** Anropas varje kvart via systemets scheduler (cron). Kontrollerar driftlägen (`batterycontrol_active` och `batterycontrol_dry_run`), beräknar strömbörvärden (A), sätter urladdningsspärr (`backup_soc`) och skickar styrkommandon till växelriktaren via Home Assistant.
 4. **`src/generate_plot.py` (Visualisering):** Renderar `plan_chart.png` som visar spotpriser, effektflöden och planerad batteri-SOC för den dynamiska planeringshorisonten (11–36 timmar).
 
