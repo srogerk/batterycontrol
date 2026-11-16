@@ -9,6 +9,8 @@
 Systemet optimerar batteriets laddning och urladdning i 15-minutersintervall över en **dynamisk planeringshorisont** (upp till 36 timmar beroende på känd Nord-Pool-data, anpassat till midnatt idag före kl 13:00 och midnatt imorgon efter kl 13:00 med terminalvärde). Det körs cykliskt var 15:e minut och utför följande huvudfunktioner:
 
 ### 1.1 Huvudfunktioner
+<!- Editorial comment: Urladdnings-delen av denna funktion 1.1.1 är inte implementerad. Den står på TODO-listan.
+-->
 #### 1.1.1 Spotprisarbitrage
 Laddar batteriet när spotpriset är lågt, och laddar ur när spotpriset är högt. Urladdning sker mot huslasten och även mot nätet om det är lönsamt. Vid beräkningen om laddning/urladdning är lönsam och skall genomföras tas hänsyn till batteriets slitagekostnad och verkningsgrad för laddning/urladdning.
 #### 1.1.2 Effektavgiftsminimering
@@ -33,17 +35,16 @@ Förhindrar att optimeraren cyklar hembatteriet i onödan på grund av orealisti
 #### 1.2.3 Tim-medeleffekt-optimering
 Under effekt-tariff-tid läser optimeraren av importerad energi under innevarande timma och anpassar planen så att medel-effekten under hela timmen skall hållas under måltaket.
 
-#### 1.2.4 Kontinuitetshysteres
-Om laddning redan pågick föregående kvart ges innevarande kvart en rabatt på på inköpsåriset. Detta motverkar fladder ('chatter') och hindrar omplaneringen från att avbryta ett påbörjat laddblock för små marginella prisskillnader.
-
-#### 1.2.5 Växlingsdämpning
+#### 1.2.4 Växlingsdämpning
 En linjär straffterm mellan på varandra följande kvartar binder samman laddningen till stabila, sammanhängande tidsfönster.
 
 ---
 
 ### 1.3 Implementationsdetaljer 
+<!- Editorial comment: Needs update after next code-update.
+-->
 #### 1.3.1 Dynamiskt effekttak
-Minimerar effektavgiften genom att begränsa toppeffekten för nät-importen under högpristid. Detta görs genom att införa ett dygnsoptimerad takvariabel $P_{\text{dag}}$. Nödvändig nätimport smetas därmed ut helt platt över alla 15-mintersperioder mellan 07:00 och 20:00.
+Minimerar effektavgiften genom att begränsa nätimportens toppeffekt under högpristid\. En brytpunkt beräknas per dygn som det högsta av tre värden: ett säsongsgolv (1,6 kW dec–jan, 1,3 kW nov/feb/mar, annars 0), månadens tredje högsta timmedeleffekt P₃, och dagens hittills högsta timmedeleffekt. P₃ är den verkliga kostnadströskeln — toppar under den påverkar inte avgiften. Import under brytpunkten är avgiftsfri; däröver kostar varje överskjutande kW 45 kr, vilket optimeraren väger mot batterislitage. Effekttaket är aktivt under effekttariff-tider (07:00–20:00 helgfria vardagar 1 nov–31 mars); utanför dessa tider gäller enbart det fasta timtaket på 13,5 kW.
 
 #### 1.3.2 Fri spotoptimering under taket
 Inom ramen för $P_{\text{dag}}$ råder verkligt spotpris utan artificiella påslag, vilket ger frihet för spotarbitrage och optimal lastfördelning.
@@ -54,17 +55,15 @@ Under effekttariff (07:00–20:00) hålls `backup_soc` strikt på 15 % basgolv. 
 #### 1.3.4 Solis-anpassad laddreglering
 I stället för on/off-pulser med maxeffekt fördelas nödvändig laddenergi jämnt över hela 15-minuterskvarten genom dynamisk beräkning och rampning av strömbörvärdet (A) baserat på batterispänning.
 
-#### 1.3.5 Stegvis progressiv laddeffekt (5 trappsteg)
-För att undvika att optimeraren rusar till 10 kW för marginella prisdifferenser modelleras laddeffekten som en konvex styckvis linjär funktion:
-    - *Steg 1 (0–4 kW):* Mjuk basladdning utan extra påslag (0,00 kr/kWh).
-    - *Steg 2 (4–6 kW):* Moderat laddeffekt (+0,08 kr/kWh påslag).
-    - *Steg 3 (6–8 kW):* Högre laddeffekt (+0,22 kr/kWh påslag).
-    - *Steg 4 (8–10 kW):* Hög laddeffekt (+0,50 kr/kWh påslag, reserveras för kraftiga prisdippar).
-    - *Steg 5 (10+ kW):* Effektspik över 10 kW (+100 % påslag av spotpriset, d.v.s. dubbelt pris, vilket effektivt förhindrar nätspikar mot huvudsäkringen).
+#### 1.3.5 Stegvis progressiv prissättning av baserat på laddeffekt (5 trappsteg)
+För att undvika att optimeraren rusar till 10 kW för marginella prisdifferenser modelleras laddeffekten till batteriet som en konvex styckvis linjär funktion. Intervallet 0–10 kW delas i fem steg om 2 kW, med ett stigande marginellt prispåslag på 4/12/20/28/36 öre/kWh. Påslaget är marginellt: det gäller energin *inom* respektive steg, så en kvart på 5 kW betalar 2 + 6 + 5 = 13 öre totalt, dvs 10,4 öre/kWh i genomsnitt.
 
 #### 1.3.6 Urladdningsspärr via `backup_soc`
 När optimeraren finner det mest lönsamt att spara lagrad energi till senare dyrare timmar (eller inför morgonens effekttaxa) spärras växelriktarens Self-Use autonomt genom att sätta `backup_soc` till aktuell SOC. När urladdning planeras sänks golvet till normal basreserv (15 %).
 
+<!- Editorial comment
+Denna funktion, 1.3.7, är inte implementerad. Behåller punkten på TODO-listan, för redesign och implementering.
+-->
 #### 1.3.7 Dynamisk reservhantering
 Fram till kl 19:00 hålls minst 1,0 kWh (ca 5 % SOC) i reserv för att parera transienta hushållstoppar (1,0 kWh under en kvart motsvarar 4 kW kontinuerlig marginal). Mellan kl 19:00 och 20:00 släpps reserven fri ner mot batteriets hårdvarugolv (0 kWh användbart).
 
