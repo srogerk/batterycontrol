@@ -10,5 +10,47 @@
   "inventory_kr": -48.91,
   "wear_kr": 4.03,
   "net_kr": 30.33
+ },
+ "2026-11-10": {
+  "cashflow_kr": 59.73,
+  "inventory_kr": 3.14,
+  "wear_kr": 3.5,
+  "net_kr": 59.37
+ },
+ "2026-11-11": {
+  "cashflow_kr": 45.88,
+  "inventory_kr": -0.3,
+  "wear_kr": 3.48,
+  "net_kr": 42.11
+ },
+ "2026-11-12": {
+  "cashflow_kr": -4.28,
+  "inventory_kr": -1.97,
+  "wear_kr": 0.97,
+  "net_kr": -7.22
+ },
+ "2026-11-13": {
+  "cashflow_kr": -0.41,
+  "inventory_kr": 0.1,
+  "wear_kr": 0.91,
+  "net_kr": -1.22
+ },
+ "2026-11-14": {
+  "cashflow_kr": -3.43,
+  "inventory_kr": -4.45,
+  "wear_kr": 0.0,
+  "net_kr": -7.89
+ },
+ "2026-11-15": {
+  "cashflow_kr": 17.77,
+  "inventory_kr": 12.19,
+  "wear_kr": 3.68,
+  "net_kr": 26.27
+ },
+ "2026-11-16": {
+  "cashflow_kr": -29.6,
+  "inventory_kr": 0.94,
+  "wear_kr": 3.0,
+  "net_kr": -31.66
  }
 }
