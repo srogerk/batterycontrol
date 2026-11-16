@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import sys
 import datetime
 import zoneinfo
@@ -8,10 +9,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-sys.path.append("/workspace/projects/Batteristyrning - effektavgift")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import src.optimizer as opt
 
-def generate_plan_chart(output_path="/workspace/projects/Batteristyrning - effektavgift/plan_chart.png"):
+def generate_plan_chart(output_path=None):
+    if output_path is None:
+        output_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   "plan_chart.png")
     client = opt.HAPriceAndStateClient()
     plan_state = client.get_state("sensor.batterycontrol_plan_now")
     load_state = client.get_state("sensor.batterycontrol_load_forecast_now")

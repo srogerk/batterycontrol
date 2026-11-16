@@ -72,40 +72,21 @@ def generate_ha_token():
     return signing_input + "." + b64(sig)
 
 class HAPriceAndStateClient:
-    def __init__(self):
-        self.ssh = paramiko.SSHClient()
-        self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.ssh.connect(HA_HOST, username=HA_USER, key_filename=SSH_KEY)
-        self.token = generate_ha_token()
+    """
+    Fabrik som returnerar rätt HA-backend för miljön (se src/ha_client.py).
 
-    def get_state(self, entity_id):
-        cmd = f'curl -s http://172.30.32.1:8123/api/states/{entity_id} -H "Authorization: Bearer {self.token}"'
-        stdin, stdout, stderr = self.ssh.exec_command(cmd)
-        try:
-            return json.loads(stdout.read().decode())
-        except Exception:
-            return None
+    Utveckling/cron  -> SshHA (paramiko + HS256-JWT, oförändrat beteende)
+    HA-add-on        -> SupervisorHA (SUPERVISOR_TOKEN mot http://supervisor/core/api)
 
-    def post_state(self, entity_id, state, attributes=None):
-        payload = {"state": str(state), "attributes": attributes or {}}
-        cmd = f'''curl -s -X POST http://172.30.32.1:8123/api/states/{entity_id} \\
-          -H "Authorization: Bearer {self.token}" \\
-          -H "Content-Type: application/json" \\
-          -d '{json.dumps(payload)}' '''
-        stdin, stdout, stderr = self.ssh.exec_command(cmd)
-        return stdout.read().decode()
+    Klassen behålls som namn så att befintliga anropare
+    (`opt.HAPriceAndStateClient()`, `optimizer_v2`, `generate_web`, ...) inte
+    behöver ändras. Sätt BATTERYCONTROL_HA_BACKEND=ssh|supervisor för att tvinga.
+    """
 
-    def call_service(self, domain, service, service_data=None):
-        payload = service_data or {}
-        cmd = f'''curl -s -X POST http://172.30.32.1:8123/api/services/{domain}/{service} \\
-          -H "Authorization: Bearer {self.token}" \\
-          -H "Content-Type: application/json" \\
-          -d '{json.dumps(payload)}' '''
-        stdin, stdout, stderr = self.ssh.exec_command(cmd)
-        return stdout.read().decode()
+    def __new__(cls, *args, **kwargs):
+        from src.ha_client import get_client
+        return get_client()
 
-    def close(self):
-        self.ssh.close()
 
 def build_price_vector(client, timestamps):
     """

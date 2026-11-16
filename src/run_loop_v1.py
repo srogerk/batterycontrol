@@ -19,13 +19,13 @@ import json
 import time
 import datetime
 
-sys.path.append("/workspace/projects/Batteristyrning - effektavgift")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import src.forecast as forecast_module
 import src.optimizer as optimizer_module
 import src.generate_plot as plot_module
 import src.generate_web as web_module
 
-LOG_FILE = "/workspace/projects/Batteristyrning - effektavgift/src/batterycontrol.log"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "batterycontrol.log")
 
 def log(msg):
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

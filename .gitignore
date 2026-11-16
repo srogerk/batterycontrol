@@ -7,3 +7,12 @@ plan_chart.png
 .DS_Store
 *.csv
 *.png
+
+# Runtime-state (sant i stunden, inte kod) - genereras av peak_tracker/ev_block
+src/peak_state.json
+src/ev_block.json
+web/ev_block.json
+web/peak_state.json
+
+# Backuper vid kodandringar
+*.bak-*

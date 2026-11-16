@@ -14,11 +14,11 @@ import zoneinfo
 import subprocess
 import numpy as np
 
-sys.path.append("/workspace/projects/Batteristyrning - effektavgift")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import src.optimizer as opt
 from src.daily_profit import compute_daily_profit
 
-LOCAL_DIR = "/workspace/projects/Batteristyrning - effektavgift/web"
+LOCAL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 HA_HOST = "10.12.22.12"
 HA_TARGET_DIR = "/config/www/batterycontrol"
 SSH_KEY = "/workspace/id_ed25519"
@@ -814,18 +814,21 @@ def build_html(data):
     return html
 
 def sync_to_ha(local_file):
-    cmd = [
-        "ssh", "-i", SSH_KEY, "-o", "StrictHostKeyChecking=accept-new",
-        f"root@{HA_HOST}", f"mkdir -p {HA_TARGET_DIR}"
-    ]
-    subprocess.run(cmd, check=True)
+    """
+    Publicera dashboarden.
 
-    scp_cmd = [
-        "scp", "-i", SSH_KEY, "-o", "StrictHostKeyChecking=accept-new",
-        local_file, f"root@{HA_HOST}:{HA_TARGET_DIR}/index.html"
-    ]
-    subprocess.run(scp_cmd, check=True)
-    print(f"Synkad till HA: {HA_TARGET_DIR}/index.html")
+    Utveckling: scp till /config/www/batterycontrol/ på HA-värden (som förut).
+    Add-on:     skriv direkt till /config/www/batterycontrol/ (map: config:rw)
+                eftersom katalogen redan är monterad i containern.
+    """
+    with open(local_file, encoding="utf-8") as f:
+        html = f.read()
+    client = opt.HAPriceAndStateClient()
+    try:
+        target = client.write_www("index.html", html)
+    finally:
+        client.close()
+    print(f"Synkad till HA: {target}")
 
 def main():
     os.makedirs(LOCAL_DIR, exist_ok=True)

@@ -4,10 +4,11 @@ Nattkontroll av batteri-SOC kl 03:30.
 Skickar en notis till Home Assistant (både persistent notification och mobil-push)
 med grön/röd status beroende på om SOC >= 80%.
 """
+import os
 import sys
 import datetime
 
-sys.path.append("/workspace/projects/Batteristyrning - effektavgift/src")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import optimizer as opt
 
 def main():
