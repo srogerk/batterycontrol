@@ -40,15 +40,33 @@ def main():
         forecast_module.main()
     except Exception as e:
         log(f"FEL i prognosmodul: {e}")
-        return
+        sys.exit(1)
 
     # 2. Optimering v2
+    #
+    # VIKTIGT: main() returnerar False när optimeringen misslyckades. I så fall
+    # ligger FÖREGÅENDE kvarts plan kvar i sensor.batterycontrol_plan_now, och
+    # stegen nedan läser börvärden ur just det sensorns attribut. Att fortsätta
+    # vore att styra på inaktuella data medan det ser ut som att allt fungerar.
+    #
+    # Så hände 2026-11-12: LP:n blev infeasible kl 16:30, 17:00 och 18:00, men
+    # run_loop fortsatte och skrev börvärden (1.05 kW respektive 0.05 kW) som
+    # kom från den gamla planen - inte från någon lösning alls.
+    #
+    # En misslyckad optimering ska vara ett synligt styrstopp, inte en tyst
+    # övergång till gammal data.
     try:
         log("Steg 2: Kör HiGHS LP-optimering v2...")
-        optimizer_module.main()
+        optimering_ok = optimizer_module.main()
     except Exception as e:
         log(f"FEL i optimeringsmodul: {e}")
-        return
+        sys.exit(1)
+
+    if not optimering_ok:
+        log("AVBRYTER: optimeringen gav ingen plan. Styr INTE på föregående kvarts "
+            "börvärden - de är inaktuella. Ingen skrivning till inverteraren görs "
+            "denna kvart. Kontrollera LP-status i loggen ovan.")
+        sys.exit(2)
 
     # 3. Kontrollera läge i HA
     client = optimizer_module.HAPriceAndStateClient()
