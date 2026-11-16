@@ -11,7 +11,11 @@ Implementerar specifikation november 2026:
 - Elbilsladdning: 3 sammanhängande timmar à 5.5 kW (8A x 3 x 240V) mellan 22:00 och 07:00 som ren nätimport.
 - Effekttariff: 1 nov - 31 mars, helgfria vardagar 07:00-20:00.
   Pris över tröskel = 45 kr/kW mätt per timmedelvärde (minut 00-00).
-  Tröskel = max(P_tak, P_3, P_eft_max, P_eft_prognos).
+  Tröskel = max(P_tak, P_3, P_max), där P_max är dagens högsta faktiska
+  timmedel och P_3 månadens tredje största (se src/peak_tracker.py).
+- En klocktimme är alltid 1,0 h: timmedeleffektsraderna räknar mot 1,0 h med
+  redan importerad energi (E_nu) i högerledet, oavsett hur många av timmens
+  kvartar som finns kvar i horisonten.
 """
 
 import sys
@@ -28,6 +32,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.optimizer import (HAPriceAndStateClient, build_price_vector,
                            is_effekttariff_day, get_p_dag_floor_kw)
 from src import ev_block
+import src.peak_tracker as peak_tracker
 from src import rescue_hour as rescue_hour_mod
 
 # Konstanter enligt spec
@@ -46,6 +51,30 @@ MAX_BATTERY_KW = 10.0         # Max laddeffekt & urladdningseffekt mot batteriet
 MAX_GRID_HOUR_KW = 13.5       # Högsta tillåtna timmedeleffekt från nätet
 
 P_TARIFF_RATE = 45.0          # kr/kW per toppdag
+P_GRID_LIMIT_RATE = 90.0      # kr/kW över 13.5 kW (se nedan)
+P_EFT_MARGIN_PCT = 10.0       # marginal på p_eft_prognos, se nedan
+
+# Varför P_GRID_LIMIT_RATE > P_TARIFF_RATE (Rogers krav 2026-11-16):
+# 13.5 kW-taket (rad 6) är INTE effekttariffen. Det är Rogers nätavtal:
+# 20 A huvudsäkringar, 14 kW effektnivå, och vid ett fjärde överskridande
+# under avtalsperioden hissas han till 43 kW med kraftigt höjd fast avgift
+# (Göteborg Energi, särskilda avtalsvillkor p. 3.8). Att överskrida 13.5 kW
+# måste därför vara dyrare än att överskrida effekttaket, annars väljer
+# optimeraren fel risk. 90 kr/kW = 2x tariffpriset uppfyller det.
+#
+# Ingen fast kostnad på 250 kr: 20 A x 3 x 230 V = 13.8 kW är den fysiska
+# maxlasten, så 14 kW kan aldrig nås och en fast kostnad skulle aldrig trigga.
+# Den skulle dessutom kräva en binär variabel (MILP) — en fast kostnad går
+# inte att uttrycka i linprog. Säkrningen själv är den fysiska backstoppen.
+#
+# Varför P_EFT_MARGIN_PCT (Rogers beslut 2026-11-16):
+# p_eft_prognos är ett GOLV — minsta genomsnittliga import som krävs för att
+# klara fönstret, räknat med att batteriet töms helt. Att sätta tröskeln UNDER
+# det värdet skapar ingen marginal, bara en garanterad straffavgift, eftersom
+# behovet finns kvar oavsett vad taket säger. Marginalen läggs därför UPPSTRÖMS
+# på prognosen (p_eft_prognos x (1 + m)), så att ett något högre faktiskt behov
+# fortfarande ligger under effekttaket. Marginalen ska inte läggas i max()-termen:
+# då vore den en konstgjord justering av ett ärligt ingångsvärde.
 
 
 def get_tariff_floor_p_tak(dt: datetime.datetime) -> float:
@@ -60,6 +89,7 @@ def optimize_v2(soc_now_kwh: float,
                  p_out: list,
                  timestamps: list,
                  p3_historical_kw: float = 0.0,
+                 p_max_today_kw: float = 0.0,
                  force_effekttariff_tomorrow: bool = False,
                  ev_charge_ordered: bool = False,
                  ev_booking: dict = None,
@@ -70,14 +100,17 @@ def optimize_v2(soc_now_kwh: float,
     """
     Kör QP/HiGHS optimering enligt Specifikation 2026-11.
 
-    hour_used_kwh / hour_threshold_kw: "rädda timmen".
+    hour_used_kwh: netto import (kWh) som redan tagits ur nätet i innevarande
+    klocktimme. Förs in i timmedeleffektsraderna som E_now i högerledet, så att
+    en pågående timme mäts mot hela timmens medelvärde och inte bara mot de
+    kvartar som råkar återstå i horisonten.
 
-    Innevarande klocktimme är delvis förbrukad. hour_used_kwh är netto
-    nätenergi (kWh) som redan gått åt sedan timmens början, och
-    hour_threshold_kw är den tröskel timmedelvärdet ska hålla sig under.
-    Skickas de in får de ÅTERSTÅENDE kvartarna bara använda
-    (tröskel*1h - redan förbrukat) tillsammans, i stället för att LP:n
-    tillåter full effekt som om timmen började nu.
+    hour_threshold_kw: ANVÄNDS INTE LÄNGRE (2026-11-17). Parametern behålls
+    enbart för bakåtkompatibilitet med anropare. Den användes av den tidigare
+    "rädda timmen"-raden (7b), som tagits bort — se kommentaren vid dess
+    före detta plats. Innevarande timme hanteras nu enbart av rad 7, som har
+    slackvariabel (P_peak_excess) och därmed är en prissättning, inte ett hårt
+    tak. Se GOM §4.7, som behöver skrivas om.
     """
     T = len(timestamps)
     if T == 0:
@@ -140,18 +173,49 @@ def optimize_v2(soc_now_kwh: float,
             avail_batt = max(0.0, soc_now_kwh - SOC_MIN_KWH)
             net_energy_needed = max(0.0, tot_load_eft - tot_pv_eft - avail_batt)
             hours_eft = len(day_q_indices) * 0.25
-            p_eft_prognos = net_energy_needed / max(1.0, hours_eft)
+            # Marginalen läggs här, uppströms — se P_EFT_MARGIN_PCT ovan.
+            p_eft_prognos = (net_energy_needed / max(1.0, hours_eft)) * (1.0 + P_EFT_MARGIN_PCT / 100.0)
         else:
             p_eft_prognos = 0.0
 
         sample_dt = datetime.datetime.combine(d, datetime.time(12, 0), tzinfo=timestamps[0].tzinfo)
         p_tak = get_tariff_floor_p_tak(sample_dt)
-        p_thresh = max(p_tak, p3_historical_kw, p_eft_prognos)
+        # P_tak = max(P_tak, P_max, P_3, P_eft_prognos)
+        # För idag används uppmätt P_max under 07-20. För morgondagen/framtida dagar är P_max ännu 0.
+        #
+        # p_eft_prognos återinförd 2026-11-17 (Rogers beslut). Den togs bort
+        # 2026-11-13 med hänvisning till GOM §4.4: "prognostiserat kvarvarande
+        # importbehov kan inte avgöra om en topp blir en av månadens tre högsta
+        # — att använda prognosen som tröskel gör taket godtyckligt högt på
+        # svaga dagar och låser batteriet."
+        #
+        # Det argumentet gäller bara om prognosen är ENDA tröskeln. Inne i en
+        # max() kan den bara HÖJA taket, aldrig sänka det — så på svaga dagar
+        # ger den ett lågt p_eft_prognos och påverkar ingenting. Kvar står den
+        # mekanism den skyddade mot: att dygnets energibehov helt enkelt inte
+        # ryms under tröskeln, vilket var precis vad som gjorde LP:n infeasible.
+        is_today = (d == timestamps[0].date())
+        effective_p_max = p_max_today_kw if is_today else 0.0
+        p_thresh = max(p_tak, p3_historical_kw, effective_p_max, p_eft_prognos)
         day_eft_prognos[d] = {
             "p_tak": p_tak,
+            "p_max": effective_p_max,
             "p_eft_prognos": p_eft_prognos,
             "p_threshold": p_thresh
         }
+
+    # Fix 6: logga tröskelns komponenter så att marginalen kan kalibreras mot
+    # verkligheten i stället för att gissas. p_eft_prognos loggades tidigare
+    # aldrig — därför vet vi inte om den typiskt ligger över eller under P3.
+    if day_eft_prognos:
+        for d in sorted(day_eft_prognos):
+            v = day_eft_prognos[d]
+            drivande = max((("p_tak", v["p_tak"]), ("P3", p3_historical_kw),
+                            ("P_max", v["p_max"]), ("p_eft", v["p_eft_prognos"])),
+                           key=lambda kv: kv[1])[0]
+            print(f"[TROSKEL] {d} p_tak={v['p_tak']:.2f} P3={p3_historical_kw:.2f} "
+                  f"P_max={v['p_max']:.2f} p_eft={v['p_eft_prognos']:.2f} "
+                  f"-> p_thresh={v['p_threshold']:.2f} (drivande: {drivande})")
 
     # 4. Formulering av optimeringsvariabler:
     # Per kvart t:
@@ -171,7 +235,11 @@ def optimize_v2(soc_now_kwh: float,
 
     # Slackvariabler för effekttariff: en variabel P_peak_excess per tariffdag
     num_tariff_days = len(sorted_tariff_days)
-    total_vars = base_vars + num_tariff_days
+    # Slackvariabel för 13.5 kW-taket: en per klocktimme. Se rad 6 nedan.
+    num_hours = len(hour_map)
+    grid_slack_base = base_vars + num_tariff_days
+    total_vars = base_vars + num_tariff_days + num_hours
+    hour_to_slack = {h: i for i, h in enumerate(hour_map.keys())}
 
     c = np.zeros(total_vars)
     # Terminalvärde för batteriets kvarvarande energi vid horisontens slut:
@@ -206,11 +274,27 @@ def optimize_v2(soc_now_kwh: float,
     for d_idx in range(num_tariff_days):
         c[base_vars + d_idx] = P_TARIFF_RATE
 
+    # Kostnad för att överskrida 13.5 kW-taket (dyrare än tariffen — se P_GRID_LIMIT_RATE)
+    for h_idx in range(num_hours):
+        c[grid_slack_base + h_idx] = P_GRID_LIMIT_RATE
+
     # Bivillkor
     A_eq = []
     b_eq = []
     A_ub = []
     b_ub = []
+
+    # Redan importerad energi i innevarande klocktimme (E_now).
+    #
+    # En klocktimme är alltid 1,0 h. När horisonten börjar mitt i en timme
+    # innehåller hour_map bara de kvartar som ÅTERSTÅR av den timmen — men
+    # timmedeleffekten mäts över hela timmen. Utan E_now i högerledet skulle
+    # LP:n tro att timmen började nu och tillåta full effekt, vilket är precis
+    # den blindfläck som "rädda timmen" tidigare kompenserade för.
+    cur_hour_key = (timestamps[0].date(), timestamps[0].hour)
+    hour_elapsed_kwh = {}
+    if hour_used_kwh is not None:
+        hour_elapsed_kwh[cur_hour_key] = max(0.0, float(hour_used_kwh))
 
     # 1. Husets lastbalans varje kvart: E_grid_load + E_batt_load + E_pv_load == E_load[t]
     for t in range(T):
@@ -300,6 +384,10 @@ def optimize_v2(soc_now_kwh: float,
 
     # 6. Max timmedeleffekt nät: Högst 13.5 kW över varje klocktimme
     # Timmedeleffekt = sum_{q in timme} (E_grid_load + sum(E_grid_batt) + E_ev_grid) <= 13.5 kWh
+    #
+    # Divisorn är ALLTID 1,0 h: en klocktimme är en timme, oavsett hur många av
+    # dess kvartar som råkar finnas i horisonten. För en pågående timme läggs den
+    # redan importerade energin (E_now) till i högerledet i stället.
     for h_key, quarters in hour_map.items():
         row_hour = np.zeros(total_vars)
         ev_energy_hour = sum(ev_grid_kw[q] * 0.25 for q in quarters)
@@ -309,13 +397,45 @@ def optimize_v2(soc_now_kwh: float,
             for i in range(num_tiers):
                 row_hour[idx + 1 + i] += 1.0 # grid_batt
 
-        # Skala så gränsen blir i medeleffekt (kW): sum(E) / (len(quarters)*0.25) <= 13.5 kW
-        # dvs sum(E) <= 13.5 * len(quarters) * 0.25
-        hour_len_h = len(quarters) * 0.25
+        # sum(E_kvar) + E_now <= 13.5 kW * 1,0 h - E_ev + slack
+        #
+        # SLACK INFÖRD 2026-11-17 (Rogers beslut).
+        #
+        # Raden var tidigare hård, med hogerledet klampat till 0 nar timmen
+        # redan var forbrukad. Det gjorde LP:n infeasible sa fort lasten
+        # oversteg 13.5 kW en hel timme (test: 15 kW last -> INFEASIBLE,
+        # oavsett SOC). Men taket ar inte fysiskt: vi skriver aldrig nagon
+        # natimportgrans till inverteraren (registret
+        # peak_max_usable_grid_power, 13 000 W, skrivs aldrig av koden).
+        # Huset far sin effekt - vaxelriktaren prioriterar self-use och tar
+        # resten fran natet. Ett hart tak i LP:n ar darfor en logn om
+        # verkligheten, och "infeasible" betyder aldrig "omojligt i huset",
+        # bara "omojligt i modellen".
+        #
+        # Priset ar P_GRID_LIMIT_RATE (90 kr/kW), hogre an tariffens 45,
+        # eftersom ett fjarde overskridande enligt avtalet hissar honom till
+        # 43 kW. Se kommentaren vid konstanten.
+        #
+        # max(0.0, ...) ar borttagen: nar E_now redan overstiger taket ska
+        # hogerledet fa bli negativt sa att slacken absorberar overskottet.
+        # Med klamningen tvingades resten av timmen till noll import, vilket
+        # ar precis den omojlighet som dödade de tre korningarna 2026-11-12.
+        e_now = hour_elapsed_kwh.get(h_key, 0.0)
+        row_hour[grid_slack_base + hour_to_slack[h_key]] = -1.0
         A_ub.append(row_hour)
-        b_ub.append(MAX_GRID_HOUR_KW * hour_len_h - ev_energy_hour)
+        b_ub.append(MAX_GRID_HOUR_KW * 1.0 - ev_energy_hour - e_now)
 
     # 7. Effekttariff: timmedeleffekt under 07-20 vardagar <= P_tröskel + P_peak_excess
+    #
+    # Tariffen mäts som medeleffekt över en FAST klocktimme (minut 00-00).
+    # Divisorn är därför alltid 1,0 h — aldrig antalet kvartar som råkar återstå.
+    # För innevarande timme läggs E_now (redan importerad energi) i högerledet:
+    #
+    #     (E_now + sum(E_kvar)) / 1,0 h  <=  p_thresh + P_peak_excess
+    # <=>  sum(E_kvar) - 1,0*P_peak_excess <= p_thresh - E_now
+    #
+    # Det gör "rädda timmen" till en inneboende egenskap hos prisfunktionen i
+    # stället för en separat heuristik.
     for h_key, quarters in hour_map.items():
         d, h = h_key
         # Kontrollera om denna timme är under aktiv effekttariff
@@ -323,7 +443,7 @@ def optimize_v2(soc_now_kwh: float,
         if is_eff:
             d_idx = day_to_idx[d]
             p_thresh = day_eft_prognos[d]["p_threshold"]
-            hour_len_h = len(quarters) * 0.25
+            e_now = hour_elapsed_kwh.get(h_key, 0.0)
 
             row_eff = np.zeros(total_vars)
             ev_energy_hour = sum(ev_grid_kw[q] * 0.25 for q in quarters)
@@ -333,37 +453,51 @@ def optimize_v2(soc_now_kwh: float,
                 for i in range(num_tiers):
                     row_eff[idx + 1 + i] += 1.0 # grid_batt
 
-            # Timmedeleffekt: sum(E) / hour_len_h <= p_thresh + P_peak_excess
-            # <=> sum(E) - hour_len_h * P_peak_excess <= p_thresh * hour_len_h
-            row_eff[base_vars + d_idx] = -hour_len_h
+            row_eff[base_vars + d_idx] = -1.0
             A_ub.append(row_eff)
-            b_ub.append(p_thresh * hour_len_h - ev_energy_hour)
+            b_ub.append(p_thresh * 1.0 - ev_energy_hour - e_now)
 
-    # 7b. "Rädda timmen": innevarande klocktimme är delvis förbrukad.
-    #
-    # Utan detta ser LP:n bara de kvartar som återstår och tillåter full effekt
-    # som om timmen började nu. Vid :45 blir det 13.5 kW i ett kvart = 4.97 kW
-    # timmedel mot ett tak på 1.3 kW — en omöjlig kompensation som LP:n inte
-    # känner till. Här får de kvarvarande kvartarna dela på det som ÅTERSTÅR av
-    # timmens energibudget i stället.
-    rescue_active = False
-    if hour_used_kwh is not None and hour_threshold_kw is not None:
-        cur_key = (timestamps[0].date(), timestamps[0].hour)
-        cur_quarters = hour_map.get(cur_key) or []
-        if cur_quarters:
-            budget_kwh = hour_threshold_kw * 1.0 - float(hour_used_kwh)
-            ev_energy_hour = sum(ev_grid_kw[q] * 0.25 for q in cur_quarters)
-
-            row_cur = np.zeros(total_vars)
-            for q in cur_quarters:
+            # Kvartsbegränsning: förhindra att en enskild kvart spikar upp mot 10-13 kW
+            # och chansar på att efterföljande kvartar parerar ned.
+            # Max nätimport per kvart under 07-20 begränsas till p_thresh + P_peak_excess
+            for q in quarters:
                 idx = q * num_vars_per_t
-                row_cur[idx + 0] += 1.0          # grid_load
+                row_q = np.zeros(total_vars)
+                row_q[idx + 0] += 1.0  # grid_load
                 for i in range(num_tiers):
-                    row_cur[idx + 1 + i] += 1.0  # grid_batt
+                    row_q[idx + 1 + i] += 1.0  # grid_batt
+                row_q[base_vars + d_idx] = -0.25
+                A_ub.append(row_q)
+                b_ub.append(p_thresh * 0.25 - ev_grid_kw[q] * 0.25)
 
-            A_ub.append(row_cur)
-            b_ub.append(max(0.0, budget_kwh - ev_energy_hour))
-            rescue_active = True
+    # 7b. BORTTAGEN 2026-11-17 (Rogers beslut).
+    #
+    # "Rädda timmen" lades ursprungligen som ett hart skyddsnat HAR (utan
+    # slackvariabel) med motiveringen att specen §4.7 kravde att timmen SKA
+    # raddas - det var ingen avvagning. Det visade sig ha tva problem:
+    #
+    # 1. Rad 7 ovan mater redan innevarande timme korrekt, eftersom E_now
+    #    ligger i hogerledet dar (hour_elapsed_kwh). 7b gjorde alltsa samma
+    #    sak en gang till, men utan slack och med en troskel som ibland var
+    #    strangare (p_now = max(p_tak, P3), utan P_max och utan prognos).
+    #    Matt 2026-11-16: rad 7 ensam gav 1,20 kW import i q0, 7b stramade
+    #    at till 0,76 kW - utan att det fanns nagon verklig kostnad bakom.
+    #
+    # 2. Utan slackvariabel kunde raden gora LP:n infeasible. Var budgeten
+    #    redan forbrukad klipptes den till 0 med max(0.0, ...), vilket
+    #    tvingade all import i resten av timmen till exakt noll - omojligt
+    #    med tomt batteri. Tre korningar 2026-11-12 (16:30, 17:00, 18:00)
+    #    dog exakt sa, med SOC pa eller under golvet.
+    #
+    # Rogers beslut 2026-11-16: aven 7b ska vara en prissattning (45 kr/kW),
+    # inte en garanti. Da ar den identisk med rad 7 och tillfor ingenting.
+    # Specen §4.7 ("timmen SKA raddas, inte en avvagning") behover skrivas om.
+    #
+    # Argument for borttagningen som Roger formulerade det: vart eget
+    # nattak i inverteraren ar inte hart. Huset far sin effekt - vaxelriktaren
+    # prioriterar self-use och tar resten fran natet. Ett hart tak i LP:n ar
+    # darfor en logn om verkligheten: infeasible ar aldrig "omojligt i huset",
+    # bara "omojligt i modellen".
 
     # Variabelgränser (bounds)
     bounds = []
@@ -380,6 +514,9 @@ def optimize_v2(soc_now_kwh: float,
 
     for d_idx in range(num_tariff_days):
         bounds.append((0.0, None))                     # P_peak_excess
+
+    for h_idx in range(num_hours):
+        bounds.append((0.0, None))                     # slack mot 13.5 kW-taket
 
     # Kör HiGHS linjär/konvex optimerare
     res = scipy.optimize.linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
@@ -448,7 +585,13 @@ def optimize_v2(soc_now_kwh: float,
 
 
 def main():
-    """Huvudfunktion för körning av v2 LP-optimering och publicering till Home Assistant."""
+    """Huvudfunktion för körning av v2 LP-optimering och publicering till Home Assistant.
+
+    Returnerar True om en plan publicerades, False om optimeringen misslyckades.
+    Anroparen MÅSTE kontrollera detta: en misslyckad körning lämnar kvar
+    föregående kvarts plan i sensor.batterycontrol_plan_now, och att styra på
+    den är att styra på inaktuella data (se run_loop.py).
+    """
     client = HAPriceAndStateClient()
 
     # 1. Läs aktuellt SOC från Solis
@@ -463,7 +606,7 @@ def main():
     if not load_state or "forecast_48h_kw" not in load_state.get("attributes", {}):
         print("Kunde inte läsa lastprognos från HA. Kör forecast.py först.")
         client.close()
-        return
+        return False
 
     load_forecast = load_state["attributes"]["forecast_48h_kw"]
     pv_forecast = pv_state["attributes"]["forecast_48h_kw"] if pv_state else [0.0]*192
@@ -502,10 +645,9 @@ def main():
         # Order av: glöm gammal bokning så nästa order får ett färskt block.
         ev_block.clear_booking()
 
-    # P3 historisk topp från Göteborg Energi tariff
-    # P3 = manadens tredje hogsta topp. 2.49 kW enligt uppgift fran
-    # Goteborg Energi (2026-11-10), ersatter tidigare hardkodade 2.0.
-    p3_hist = 2.49
+    # Uppdatera och hämta månadens effekttoppar P1, P2, P3 samt dagens P_max från HA
+    p1_peak, p2_peak, p3_hist, p_max_today, last_q_kw = peak_tracker.update_and_get_peaks(client, now)
+    print(f"[EFFEKTAVGIFT] Aktuella toppar: P1={p1_peak} kW, P2={p2_peak} kW, P3={p3_hist} kW | P_max idag={p_max_today} kW | Senaste kvart={last_q_kw} kW")
 
     # 3c. "Rädda timmen": mät vad innevarande klocktimme redan förbrukat så att
     #     LP:n inte tillåter full effekt i de kvarvarande kvartarna.
@@ -543,6 +685,7 @@ def main():
         p_out=p_out,
         timestamps=valid_timestamps,
         p3_historical_kw=p3_hist,
+        p_max_today_kw=p_max_today,
         ev_charge_ordered=ev_order_active,
         ev_booking=ev_booking,
         ev_now=now,
@@ -554,7 +697,7 @@ def main():
     if not plan:
         print(f"Optimeringen misslyckades: {status}")
         client.close()
-        return
+        return False
 
     print(f"Optimering löst på {elapsed:.3f} s! Status: {status}")
     q0 = plan[0]
@@ -604,6 +747,7 @@ def main():
 
     client.close()
     print("Plan publicerad till sensor.batterycontrol_plan_now i Home Assistant.")
+    return True
 
 
 if __name__ == "__main__":
