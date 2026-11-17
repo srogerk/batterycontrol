@@ -1,0 +1,14 @@
+# Basimage for bygget. Utan denna fil anvander Supervisor en bart Alpine-
+# image utan python/pip, och Dockerfile ns `pip3 install` faller direkt.
+#
+# base-python finns fran Home Assistant och innehaller python3, pip och
+# bashio (som run.sh:s `#!/usr/bin/with-contenv bashio` kraver).
+#
+# Viktigt: numpy/scipy/matplotlib/pyyaml publiceras som musllinux-hjul for
+# cp313 och uppat. Alpine 3.22 + python 3.13 ar den kombination som bevisligen
+# har hjul for alla fyra - valj inte en aldre python utan att kontrollera
+# PyPI forst, da blir det kallkodskompilering (langsamt och minneskravande
+# pa en box med 3,8 GB RAM).
+build_from:
+  amd64: ghcr.io/home-assistant/base-python:3.13-alpine3.22
+  aarch64: ghcr.io/home-assistant/base-python:3.13-alpine3.22

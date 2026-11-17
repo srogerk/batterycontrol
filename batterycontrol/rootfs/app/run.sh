@@ -4,7 +4,8 @@
 # Startskript för BatteryControl-add-onen.
 #
 # Läser options ur /data/options.json (skrivs av Supervisor) och exponerar dem
-# som miljövariabler som run_loop.py kan läsa. Startar sedan:
+# som BC_*-miljövariabler. Se kommentaren vid OPTIONS nedan: run_loop.py läser
+# dem ännu INTE — konstanterna är hårdkodade i src/optimizer_v2.py. Startar:
 #   1. ingress-servern på 8099 (dashboarden i sidopanelen)
 #   2. kvartsloopen internt — ingen cron behövs, det är en av poängerna
 #
@@ -16,7 +17,12 @@ OPTIONS=/data/options.json
 
 if [ -f "$OPTIONS" ]; then
     echo "[batterycontrol] läser options"
-    # bashio läser JSON; exportera till miljö för run_loop.py
+    # OBS: run_loop.py läser INTE BC_*-variablerna. Optimeringens konstanter
+    # (battery_capacity_kwh, soc_min/max_pct, max_grid_hour_kw, wear, ...) är
+    # hårdkodade i src/optimizer_v2.py. Variablerna exporteras ändå så att de
+    # finns tillgängliga den dag konstanterna flyttas hit — men att ändra ett
+    # värde i add-onens konfigurationsdialog påverkar INTE styrningen ännu.
+    # Enda undantaget är BC_LOOP_INTERVAL_SECONDS, som används längre ner här.
     export BATTERYCONTROL_CONFIG="$(cat "$OPTIONS")"
     for key in battery_capacity_kwh soc_min_pct soc_max_pct battery_max_kw \
                max_grid_hour_kw tariff_rate_kr_per_kw tariff_floor_kw \
@@ -56,11 +62,14 @@ trap _term TERM INT
 
 # --- kvartsloopen
 while true; do
-    echo "[batterycontrol] --- kör kvartsoptimering ---"
+    echo "[batterycontrol] --- kor kvartsoptimering ---"
+    # Spara exitkoden i en variabel FORE echo: "$?" avlases annars efter echo,
+    # vilket alltid ger 0 och doljer att optimeringen faktiskt misslyckades.
     if python3 /app/src/run_loop.py; then
         echo "[batterycontrol] optimering klar"
     else
-        echo "[batterycontrol] FEL: optimering misslyckades (exit $?)"
+        rc=$?
+        echo "[batterycontrol] FEL: optimering misslyckades (exit $rc)"
     fi
     sleep "$INTERVAL"
 done

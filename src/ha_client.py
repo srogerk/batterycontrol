@@ -121,10 +121,16 @@ class SupervisorHA:
         return _first_series(payload)
 
     def read_json_file(self, path):
-        # I en add-on ligger HA:s konfigurationskatalog på /config.
+        # I en add-on ligger HA:s konfigurationskatalog pa /config (map: config:rw).
+        # Anvand paths.config_dir() i stallet for att hardkoda /config, sa att
+        # BATTERYCONTROL_CONFIG_DIR faktiskt respekteras (den satts av run.sh och
+        # av testmiljoer). /homeassistant/ ar HA:s interna prefix i dev-laget.
         candidates = [path]
         if path.startswith("/homeassistant/"):
-            candidates.append(path.replace("/homeassistant/", "/config/", 1))
+            cfg = paths.config_dir() or "/config"
+            candidates.append(
+                os.path.join(cfg, path[len("/homeassistant/"):])
+            )
         for p in candidates:
             try:
                 with open(p, encoding="utf-8") as f:

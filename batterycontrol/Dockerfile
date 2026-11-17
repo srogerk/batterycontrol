@@ -20,23 +20,23 @@ FROM ${BUILD_FROM}
 ARG REPO_URL=https://github.com/srogerk/batterycontrol.git
 ARG REPO_REF=main
 
+# Beroendena ligger i imagen - inte i en .startup.sh som kan glomma ett paket.
+# python3 och pip finns redan i basimagen (base-python); darfor inte langre
+# apk-paketen python3/py3-pip/py3-numpy (de blandade apk- och pip-numpy).
+# pandas togs bort 2026-11-18: ingen fil i src/ importerar det.
+#
+# Kallkoden hamtas i samma RUN. "git fetch <ref>" loser gren, tagg OCH
+# commit-SHA; "git clone --branch" gor det inte (den vagrar ett SHA, och en
+# ||-fallback klonar da tyst default-grenen sa bygget blir gront med fel kod).
 RUN apk add --no-cache \
         git \
-        python3 \
-        py3-pip \
-        py3-numpy \
         tzdata \
     && pip3 install --no-cache-dir --break-system-packages \
+        numpy \
         scipy \
         matplotlib \
         holidays \
-        pandas \
         pyyaml \
-    # Beroendena ligger i imagen — inte i en .startup.sh som kan glömma ett paket.
-    # Hamta exakt den ref som REPO_REF pekar pa - gren, tagg eller commit-SHA.
-    #
-    # "git fetch <ref>" loser alla tre; "git clone --branch" gor det inte (den
-    # vagrar ett SHA, och en ||-fallback klonar da tyst default-grenen).
     && mkdir -p /app/src-repo \
     && cd /app/src-repo \
     && git init -q \
