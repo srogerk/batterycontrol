@@ -1,0 +1,19 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+#
+# Ingress-server (dashboarden i sidopanelen), port 8099.
+#
+# Egen s6-tjanst, inte ett &-jobb inuti kvartsloopen. Skalet: dashboarden ska
+# overleva att optimeringen kraschar. Ligger de i samma process tystnar bada
+# samtidigt och orsaken blir svarare att se an den ar.
+#
+# exec: s6 ska aga processen, inte ett skal ovanpa den. Annars far s6 fel PID
+# att skicka signaler till och omstarten fungerar inte.
+
+set -e
+
+export PYTHONPATH=/app
+export CONFIG_DIR=/config
+export INGRESS_PORT=8099
+
+exec python3 /app/ingress_server.py

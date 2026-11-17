@@ -1,0 +1,105 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+#
+# Kvartsloopen. Optimerar och styr batteriet en gang per kvart.
+#
+# KOR SOM S6-LONGRUN, inte som CMD. Skillnaden ar att s6 overvakar processen
+# och startar om den om den dor. Tidigare lag run.sh som CMD och levde som en
+# ensam process utan overvakning: kraschade den dog appen tyst, och ingen
+# larmade. Det var hela larmluckan.
+#
+# Inget CMD finns kvar i Dockerfile - s6 ager starten, som i HA:s egna appar.
+
+set -e
+
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+# OBS: run_loop.py laser INTE BC_*-variablerna. Optimeringens konstanter
+# (battery_capacity_kwh, soc_min/max_pct, max_grid_hour_kw, wear, ...) ar
+# hardkodade i src/optimizer_v2.py. Variablerna exporteras anda sa att de
+# finns den dag konstanterna flyttas hit - men att andra ett varde i appens
+# konfigurationsdialog paverkar INTE styrningen annu.
+OPTIONS=/data/options.json
+
+if [ -f "$OPTIONS" ]; then
+    bashio::log.info "laser options"
+    export BATTERYCONTROL_CONFIG="$(cat "$OPTIONS")"
+    for key in battery_capacity_kwh soc_min_pct soc_max_pct battery_max_kw \
+               max_grid_hour_kw tariff_rate_kr_per_kw tariff_floor_kw \
+               wear_kr_per_kwh ev_battery_kwh dry_run loop_interval_seconds; do
+        value=$(bashio::config "$key" 2>/dev/null || true)
+        if [ -n "$value" ] && [ "$value" != "null" ]; then
+            export "BC_$(echo "$key" | tr '[:lower:]' '[:upper:]')=$value"
+        fi
+    done
+else
+    bashio::log.info "/data/options.json saknas - anvander standardvarden"
+fi
+
+if [ -z "$SUPERVISOR_TOKEN" ]; then
+    bashio::log.warning "SUPERVISOR_TOKEN saknas"
+fi
+
+export BATTERYCONTROL_DATA_DIR=/data
+export BATTERYCONTROL_CONFIG_DIR=/config
+export BATTERYCONTROL_HA_BACKEND=supervisor
+export PYTHONPATH=/app
+
+# ---------------------------------------------------------------------------
+# Kvartsjustering
+# ---------------------------------------------------------------------------
+# Sov till nasta kvartgrans i stallet for fast 900 s.
+#
+# Fallan med fast sleep: den raknas fran foregaende start, sa en loop som
+# rakar starta 22:35:33 ligger kvar pa :35:33, :50:33, :05:33 resten av
+# dygnet. Offseten ar permanent, inte slumpmassig.
+#
+# Varfor det spelar roll: optimizer_v2.py golvar starttiden till aktuell
+# kvart (now.replace(minute=(now.minute // 15) * 15)). Startar vi 22:35:33
+# planeras kvarten 22:30-22:45 som om den hade 15 minuter kvar, fast det
+# aterstar 9,5. Spotpriset ar kvartsupplost, sa vi handlar da pa ett pris
+# som bara galler en del av kvarten.
+#
+# I stabilt lage landar varje korning pa :00:0x, :15:0x, :30:0x, :45:0x.
+#
+# Forsta varvet kors DIRECT, utan att vanta pa gransen. En omstart -
+# uppdatering, krasch, HA-omstart - far inte lamna styrningen utan korning
+# i upp till 15 minuter. Det varv som da rakar hamna mitt i en kvart ar
+# samma avvagning som tidigare alltid gjordes; i stabilt lage forsvinner
+# den helt.
+now=$(date +%s)
+echo "[batterycontrol] startar $(date '+%Y-%m-%d %H:%M:%S %Z') (kallkod $(cat /app/COMMIT 2>/dev/null || echo '?'))"
+
+# loop_interval_seconds styr fortfarande, men bara 900 ger kvartsjustering.
+# Ett annat varde ar inte fel - det ar bara inte kvartsbundet, och da finns
+# ingen grans att synka mot. Vi sager det hogt i stallet for att tyst ignorera
+# optionen, samma falla som nar BC_*-variablerna visade sig vara dekoration.
+INTERVAL="${BC_LOOP_INTERVAL_SECONDS:-900}"
+if [ "$INTERVAL" -ne 900 ] 2>/dev/null; then
+    echo "[batterycontrol] VARNING: loop_interval_seconds=${INTERVAL} - ingen kvartsjustering (bara 900 synkas mot kvartgransen)"
+fi
+
+sleep_to_next() {
+    if [ "$INTERVAL" -eq 900 ] 2>/dev/null; then
+        local nu
+        nu=$(date +%s)
+        sleep $(( 900 - nu % 900 ))
+    else
+        sleep "$INTERVAL"
+    fi
+}
+
+while true; do
+    echo "[batterycontrol] --- kor kvartsoptimering ---"
+    # Spara exitkoden i en variabel FORE echo: "$?" avlases annars efter echo,
+    # vilket alltid ger 0 och doljer att optimeringen faktiskt misslyckades.
+    if python3 /app/src/run_loop.py; then
+        echo "[batterycontrol] optimering klar"
+    else
+        rc=$?
+        echo "[batterycontrol] FEL: optimering misslyckades (exit $rc)"
+    fi
+
+    sleep_to_next
+done

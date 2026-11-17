@@ -1,0 +1,19 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+#
+# Kors av s6 nar ingress-servern dor. Utan den har raden skulle en server som
+# inte kan binda port 8099 startas om i oandlighet utan att nagon ser varfor -
+# bara en dashboard som aldrig svarar.
+#
+# Vi stoppar inte containern: styrningen i kvartsloopen ska fortsatta fungera
+# aven om dashboarden ar trasig.
+
+exit_code_service="${1}"
+exit_code_signal="${2}"
+
+bashio::log.error \
+  "ingress-servern avslutades (exit ${exit_code_service}, signal ${exit_code_signal}) - s6 startar om den"
+
+if [ "${exit_code_service}" -ne 0 ] && [ "${exit_code_service}" -ne 256 ]; then
+    bashio::log.error "port 8099 kan vara upptagen - dashboarden ar otillganglig tills felet ar atgardat"
+fi

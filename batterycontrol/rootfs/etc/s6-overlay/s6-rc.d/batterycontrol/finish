@@ -1,0 +1,23 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+#
+# Kors av s6 nar tjansten dor, fore omstarten.
+#
+# Utan den har raden ar en kraschande loop tyst: s6 startar om den, den dor
+# igen, och loggen fylls av optimeringsrader utan att nagon ser orsaken.
+# Exitkoden har ar det enda stallet den framgar.
+#
+# Vi stoppar INTE containern (som HA:s assist_microphone gor i sin finish).
+# Skalet: en tillfallig krasch - t.ex. att HA Core startar om och sensorerna
+# tillfalligt inte gar att lasa - ska inte sla ut styrningen permanent.
+# s6 provar igen vid nasta tur, och den har raden gor det synligt.
+
+exit_code_service="${1}"
+exit_code_signal="${2}"
+
+bashio::log.error \
+  "kvartsloopen avslutades (exit ${exit_code_service}, signal ${exit_code_signal}) - s6 startar om den"
+
+if [ "${exit_code_service}" -ne 0 ] && [ "${exit_code_service}" -ne 256 ]; then
+    bashio::log.error "upprepade rader har betyder att felet ar varaktigt, inte tillfalligt"
+fi

@@ -99,8 +99,23 @@ WORKDIR /app
 
 COPY rootfs /
 
-RUN chmod +x /app/run.sh
+# s6 kor tjansterna fran rootfs/etc/s6-overlay/s6-rc.d/. Run-skripten maste
+# vara korbara - s6 vagrar starta dem annars och containern dor.
+RUN chmod +x \
+        /etc/s6-overlay/s6-rc.d/batterycontrol/run \
+        /etc/s6-overlay/s6-rc.d/batterycontrol/finish \
+        /etc/s6-overlay/s6-rc.d/ingress/run \
+        /etc/s6-overlay/s6-rc.d/ingress/finish
 
 EXPOSE 8099
 
-CMD [ "/app/run.sh" ]
+# INGEN CMD.
+#
+# Basimagen har ENTRYPOINT ["/init"] (s6-overlay). Tjansterna deklareras i
+# s6-rc.d och startas av s6 - precis som i HA:s egna appar (assist_microphone
+# har ingen CMD heller). En CMD har skulle starta en ANDRA kopia av loopen
+# vid sidan av s6-tjansten: tva loopar, samma inverterare, samma problem som
+# vi just tog bort cron for.
+#
+# Bonus: s6 startar om en tjanst som dor. Tidigare lag run.sh som CMD utan
+# overvakning, sa en krasch tystnade appen utan att nagon larmade.
