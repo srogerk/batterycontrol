@@ -52,18 +52,79 @@ def save_peak_state(state):
         print(f"Kunde inte spara peak_state.json: {e}")
 
 
-def get_current_peaks_from_ha(client):
-    """Läser P1, P2, P3 från Home Assistant (input_number)."""
-    p1_st = client.get_state("input_number.batterycontrol_p1")
-    p2_st = client.get_state("input_number.batterycontrol_p2")
-    p3_st = client.get_state("input_number.batterycontrol_p3")
+PEAK_KEYS = ("p1", "p2", "p3")
 
-    p1 = float(p1_st.get("state", 2.80)) if p1_st else 2.80
-    p2 = float(p2_st.get("state", 2.65)) if p2_st else 2.65
-    p3 = float(p3_st.get("state", 2.49)) if p3_st else 2.49
 
-    sorted_p = sorted([p1, p2, p3], reverse=True)
-    return sorted_p[0], sorted_p[1], sorted_p[2]
+def read_peaks_from_ha(client):
+    """Läser P1/P2/P3 ur HA. Returnerar None per värde som saknas.
+
+    Används BARA vid engångsmigrering och för att upptäcka drift mot
+    spegeln - HA är inte langre nagon kalla (se load_peaks).
+
+    Varden <= 0 behandlas som "ingen data": input_number har initial: 0.0,
+    sa 0.0 ar vad en ny eller aterstalld entitet visar - inte en matning.
+    Utan den kontrollen skulle en tom state-fil + en nyomstartad HA
+    migrera in 0.0 som om det vore manadens toppar.
+    """
+    out = []
+    for key in PEAK_KEYS:
+        st = client.get_state(f"input_number.batterycontrol_{key}")
+        val = st.get("state") if st else None
+        try:
+            num = float(val) if val not in (None, "unknown", "unavailable") else None
+        except (TypeError, ValueError):
+            num = None
+        out.append(num if num is not None and num > 0.0 else None)
+    return tuple(out)
+
+
+def load_peaks(state, client):
+    """Hämtar P1/P2/P3 ur state-filen - den enda källan.
+
+    Tidigare lästes värdena ur HA:s input_number vid varje kvart, med
+    hardkodade fallback (2.80/2.65/2.49) om entiteten var trasig. Tva fel
+    foljde av det:
+
+      1. HA blev kalla i stallet for spegel. En omladdning, en omstart
+         eller en manuell ändring i HA satte sanningen for hela styrningen.
+      2. Fallback-vardena var indistinkta fran verkliga matvarden, sa en
+         tyst fallback gick inte att upptacka i loggen.
+
+    State-filen ligger pa en skrivbar yta som overlever bade omstart av
+    HA och av add-onen (/data respektive web/). Den ar darfor kallan.
+    """
+    if all(k in state for k in PEAK_KEYS):
+        return float(state["p1"]), float(state["p2"]), float(state["p3"])
+
+    # Migrering: state-filen ar aldre an denna kod och har inga toppar.
+    # Las HA en gang och persistera - darefter ar filen kallan.
+    from_ha = read_peaks_from_ha(client)
+    if any(v is None for v in from_ha):
+        raise RuntimeError(
+            "P1/P2/P3 saknas bade i peak_state.json och i Home Assistant. "
+            "Vagrar gissa: en pahittad troskel styr batteriet fel.")
+
+    p1, p2, p3 = sorted(from_ha, reverse=True)
+    state.update({"p1": round(p1, 2), "p2": round(p2, 2), "p3": round(p3, 2)})
+    save_peak_state(state)
+    print(f"[PEAK TRACKER] Migrerade P1/P2/P3 fran HA till state-filen: "
+          f"P1={p1} P2={p2} P3={p3}")
+    return p1, p2, p3
+
+
+def ensure_ha_mirror(client, p1, p2, p3):
+    """Skriver P1/P2/P3 till HA om de avviker fran state-filen.
+
+    Gor HA sjalvlakande: en omladdning som lamnar entiteterna pa gamla
+    varden rattas vid nasta kvart, utan att nagon manuell insats kravs.
+    Skrivningen sker bara vid avvikelse, sa det kostar normalt ingenting.
+    """
+    want = (round(p1, 2), round(p2, 2), round(p3, 2))
+    cur = read_peaks_from_ha(client)
+    if all(c is not None and abs(c - w) < 0.005 for c, w in zip(cur, want)):
+        return
+    print(f"[PEAK TRACKER] HA avviker fran state-filen (HA={cur}, rattar till {want}).")
+    set_peaks_in_ha(client, *want)
 
 
 def set_peaks_in_ha(client, p1, p2, p3):
@@ -91,14 +152,40 @@ def update_and_get_peaks(client, now: datetime.datetime):
 
     state = load_peak_state()
     if state.get("month") != current_month_str:
-        print(f"[PEAK TRACKER] Ny månad ({current_month_str})! Nollställer månadsstate.")
-        state = {
-            "month": current_month_str,
-            "daily_peaks": {}
-        }
-        save_peak_state(state)
+        if state.get("month") is None:
+            # Ingen lasbar state-fil. Det ar INTE ett manadsskifte - vi vet
+            # inte om det ar samma manad eller inte. Lamna p-nycklarna borta
+            # sa att load_peaks forsoker migrera fran HA, och vagra omaven
+            # HA saknar data. Ett nollstallande har vore att kasta bort
+            # manadens toppar utan att veta om de behovs.
+            print("[PEAK TRACKER] Ingen lasbar state-fil - forsoker migrera fran HA.")
+            state = {"month": current_month_str, "daily_peaks": {}}
+            save_peak_state(state)
+        else:
+            print(f"[PEAK TRACKER] Ny månad ({current_month_str})! Nollställer månadsstate.")
+            # P1/P2/P3 ar manadens tre hogsta timmedeleffekter (MTD). Vid ett
+            # manadsskifte finns inga timmar an, sa de maste nollas - annars
+            # ligger forra manadens toppar kvar som troskel och haller
+            # batteriet passivt hela den nya manaden. Golv troskeln ar sand i
+            # stallet (P_tak faller tillbaka pa sasongsgolvet).
+            state = {
+                "month": current_month_str,
+                "daily_peaks": {},
+                "p1": 0.0,
+                "p2": 0.0,
+                "p3": 0.0,
+            }
+            save_peak_state(state)
 
-    p1, p2, p3 = get_current_peaks_from_ha(client)
+    p1, p2, p3 = load_peaks(state, client)
+
+    # HA ar en spegel av state-filen, inte en kalla. Rattar en omladdning
+    # som lamnat entiteterna pa gamla varden redan har, innan planen ritas.
+    try:
+        ensure_ha_mirror(client, p1, p2, p3)
+    except Exception as exc:
+        print(f"[PEAK TRACKER] kunde inte spegla till HA: {exc}")
+
     p_max_today = 0.0
     last_quarter_kw = 0.0
 
@@ -159,6 +246,13 @@ def update_and_get_peaks(client, now: datetime.datetime):
 
                     if (new_p1, new_p2, new_p3) != (p1, p2, p3):
                         print(f"[PEAK TRACKER] Ny timtopp uppnådd ({p_max_today} kW)! Uppdaterar HA...")
+                        # State-filen ar kallan: skriv den forst, spegla sedan.
+                        # Kraschar HA-anropet efterat ar vardena anda säkrade
+                        # och rattas vid nasta kvart av ensure_ha_mirror.
+                        state["p1"] = round(new_p1, 2)
+                        state["p2"] = round(new_p2, 2)
+                        state["p3"] = round(new_p3, 2)
+                        save_peak_state(state)
                         set_peaks_in_ha(client, new_p1, new_p2, new_p3)
                         p1, p2, p3 = new_p1, new_p2, new_p3
 
