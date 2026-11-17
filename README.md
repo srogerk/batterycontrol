@@ -75,7 +75,7 @@ Styr ChargeAmps Halo laddbox autonomt. Vid "bokning" identifieras det optimala 3
 
 ## 2. Arkitektur och logik
 
-Systemet ä  r uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lager:
+Systemet är uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lager:
 
 ```
                   [ Home Assistant REST API ]
@@ -84,7 +84,7 @@ Systemet ä  r uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lage
                  |             |             |
                  v             v             v
        +------------------+    |    +-------------------+
-       |   forecast.py    |    |    |   optimizer_v2.py |
+       |   forecast.py    |    |    |  optimizer_v2.py  |
        | Adaptiv last- &  |    |    | Global dynamisk   |
        | solprognos       |--->|--->| LP (SciPy HiGHS)  |
        +------------------+    |    +-------------------+
@@ -98,13 +98,30 @@ Systemet ä  r uppbyggt som en rullande MPC-loop uppdelad i tre samverkande lage
                                |
                                v
                      [ Solis Modbus / HA ]
-             (TOU Slot 1, backup_soc, peak-shaving)
+                       (TOU Slot 1, backup_soc)
 ```
 
-1. **`src/forecast.py` (Prognosmotor):** Hämtar historisk baslast, väder- och solprognos, applicerar värmekoefficienter för utetemperatur och beräknar en adaptiv bias mot aktuell förbrukning. Skickar prognosvektorer till Home Assistant (anpassas dynamiskt av optimeraren till kända Nord Pool-timmar).
-2. **`src/optimizer.py` (Global LP-lösare):** Formulerar ett linjärprogrammeringsproblem (LP) med dynamisk horisont T kvartar (upp till 36 timmar kända Nord Pool-priser) och 11 variabler per kvart (inklusive 5 progressiva laddeffektsteg och rampningsvariabler). Lösaren (`scipy.optimize.linprog` med HiGHS-metoden) minimerar total nettokostnad under givna bivillkor (SOC-dynamik, batterigränser, effekttak, säkringsgräns, kontinuitetshysteres och terminalvärde). Lösningen tar ca 0,05 s.
-3. **`src/run_loop.py` (Exekveringsloop):** Anropas varje kvart via systemets scheduler (cron). Kontrollerar driftlägen (`batterycontrol_active` och `batterycontrol_dry_run`), beräknar strömbörvärden (A), sätter urladdningsspärr (`backup_soc`) och skickar styrkommandon till växelriktaren via Home Assistant.
-4. **`src/generate_plot.py` (Visualisering):** Renderar `plan_chart.png` som visar spotpriser, effektflöden och planerad batteri-SOC för den dynamiska planeringshorisonten (11–36 timmar).
+1. **`src/forecast.py` (Prognosmotor):** Hämtar historisk baslast, väder- och solprognos, applicerar värmekoefficienter för utetemperatur och beräknar en adaptiv bias mot aktuell förbrukning. Skickar prognosvektorer till Home Assistant (anpassas dynamiskt av optimeraren till kända Nord Pool-kvartar).
+2. **`src/optimizer_v2.py` (Global LP-lösare):** Formulerar ett linjärprogrammeringsproblem med **11 variabler per kvart** — nätimport till last (1), fem progressiva laddeffektsteg (5), energi till last / PV till last / PV till batteri / PV till nät (4) samt rampvariabeln `dP` (1). Lösaren (`scipy.optimize.linprog` med HiGHS-metoden) minimerar total nettokostnad under följande bivillkor:
+   - lastbalans och PV-balans per kvart,
+   - SOC-dynamik inom 3,75–25,0 kWh (15–100 % av 25 kWh nominell kapacitet),
+   - batterigränser (max 10 kW laddning, max 2,5 kWh urladdning per kvart),
+   - timmedeleffekt mot nätet ≤ 13,5 kW (`MAX_GRID_HOUR_KW`) med slackvariabel prissatt till 90 kr/kW — raden är en prissättning, inte ett hårt tak (huset får alltid sin effekt; växelriktaren prioriterar self-use och tar resten från nätet),
+   - tariffrad per tariffdag ≤ taket plus slackvariabeln `P_peak_excess` (45 kr/kW),
+   - rampdämpning `dP ≥ |ΔE_batt|`, viktad 0,02 kr/kWh för att undvika hackig laddning,
+   - terminalvärde `v_term` = sista kända kvartens spotpris, så att batteriet varken töms eller panikladdas vid horisontens slut.
+
+   Det finns **ingen kontinuitetshysteres** i v2 — den enda utjämningen är ramptermen `dP`. **Horisonten T** är antalet kvartar med känd Nord Pool-pris: optimeraren begär upp till 192 kvartar (48 h) och bryter så snart prisdata upphör. I praktiken blir det ca **25–48 timmar beroende på när på dygnet körningen sker** (morgondagens priser publiceras runt kl 13). Lösningen tar ca **0,02 s**.
+3. **`src/run_loop.py` (Exekveringsloop):** Körs var 15:e minut — i add-onen av en intern loop i `run.sh` (`sleep 900`), i utvecklingsmiljön av cron. Kontrollerar driftlägen (`batterycontrol_active` och `batterycontrol_dry_run`), beräknar strömbörvärden (A) ur planens kW och uppmätt batterispänning, sätter urladdningsspärr (`backup_soc`) och skickar styrkommandon till växelriktaren via Home Assistant.
+4. **`src/generate_plot.py` (Visualisering):** Renderar `plan_chart.png` som visar spotpriser, effektflöden och planerad batteri-SOC över den dynamiska planeringshorisonten.
+5. **Stödtjänster runt loopen:**
+   - `src/peak_tracker.py` — spårar månadens tre högsta timmedeleffekter och dygnets hittills högsta topp. **Källan är `peak_state.json`** (i `/data` som add-on, i `web/` i utvecklingsmiljön); `input_number.batterycontrol_p1..p3` är en **spegling** som skrivs om när den avviker. En omstart eller omladdning av Home Assistant kan därför inte ändra styrningen — spegeln rättas vid nästa kvart.
+   - `src/rescue_hour.py` — mäter redan förbrukad nätenergi under innevarande timme (`E_nu`). Det är den direkta indatan till timmedeleffektsraderna, så att en pågående timme mäts mot hela timmens medelvärde och inte bara mot de kvartar som återstår. Den separata "rädda timmen"-raden i LP:n är borttagen 2026-11-17 — se `GLOBAL-OPTIMERING-MODELL.md` §4.7.
+   - `src/ev_block.py` — bokning och samplanering av elbilsladdning (3 timmar à 5,5 kW = 16,5 kWh före kl 07:00).
+   - `src/paths.py` — sökvägsupplösning som gör samma kod körbar både som cron-jobb och som add-on (`/data` som skrivbar yta, `src/` read-only i imagen).
+   - `src/ha_client.py` — två HA-backends: `SupervisorHA` (add-on, `SUPERVISOR_TOKEN`) och `SshHA` (utveckling, SSH till HA-värden), med `get_state` / `post_state` / `call_service` / `history` / `read_json_file`.
+   - `src/daily_profit.py` — dygnsarkiv för intäkt/kostnad som dashboarden läser.
+   - `src/generate_web.py` + `batterycontrol/rootfs/app/ingress_server.py` — genererar dashboarden och serverar den på port 8099 i sidopanelen; kopian i `/config/www/batterycontrol/` möjliggör även `/local/`-åtkomst.
 
 ---
 
@@ -114,21 +131,25 @@ Systemet är utformat för en specifik hård- och mjukvaruinfrastruktur:
 
 ### 3.1 Hårdvaruberoende
 - **Växelriktare:** Enbart testat och verifierat mot **Solis hybridväxelriktare** (specifikt 3-fas HV-hybrid, Solis S6-EH3P15K-H).
-  - Styrningen förutsätter att växelriktaren är konfigurerad i driftläget `Self-Use + TOU + Reserve/Backup`.
-  - Laddning sker via TOU Slot 1 (`grid_time_of_use_charge_*`).
-  - Urladdningsspärr styrs via registret för Backup SOC (`number.solis_s6_eh1p_backup_soc`, register 43024).
-  - Hårt nätimporttak styrs via Solis inbyggda Grid Peak-Shaving (`number.solis_s6_eh1p_peak_max_usable_grid_power`, register 43488).
+  - Styrningen förutsätter att växelriktaren är konfigurerad i driftläget `Self-Use + TOU + Reserve/Backup` (`select.work_mode`).
+  - Laddning sker uteslutande via **TOU Slot 1**: `switch.grid_time_of_use_charging_period_1` slås på, `time.solis_s6_eh1p_grid_time_of_use_charge_start_slot_1` / `..._end_slot_1` sätts till aktuellt kvart och blockets slut, `number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1` får den beräknade strömmen och `..._cut_off_soc_slot_1` sätts till 100 %.
+  - **Urladdning kan bara spärras eller tillåtas, inte regleras.** Spärren sker via Backup SOC (`number.solis_s6_eh1p_backup_soc`, register 43024): ett golv lika med aktuell SOC blockerar Self-Use, och 15 % släpper den fri ner till batteriets basreserv. Regeln är binär — under effekttariffönstret (07–20 på tariffdagar), eller när planen vill ladda ur, sätts golvet till 15 %, annars till aktuell SOC. Det finns alltså ingen kanal för att beordra en viss urladdningseffekt: planens urladdningsbehov loggas och verkställs indirekt via golvet.
+  - **Solis inbyggda Grid Peak-Shaving** (`number.solis_s6_eh1p_peak_max_usable_grid_power`, register 43488) är konfigurerad i växelriktaren och står på 13 000 W, men **skrivs aldrig av programvaran**. Importtaket i systemet är LP-raden `MAX_GRID_HOUR_KW = 13,5 kW`, inte registret — och den raden har sedan 2026-11-17 en slackvariabel (90 kr/kW), eftersom taket inte är fysiskt: huset får sin effekt oavsett vad planen säger. Den fysiska backstoppen är huvudsäkringen, 20 A × 3 × 230 V = 13,8 kW.
+  - Ingen batteriexport sker: planen innehåller flödet PV→nät, men inget batteri→nät.
 
 ### 3.2 Mjukvaruberoenden
-- **Python-miljö:** Python 3.10+ med `scipy`, `numpy`, `paramiko`, `holidays`, `requests`/`urllib`.
+- **Python-miljö:** Python 3.10+ med `scipy`, `numpy`, `holidays` och `matplotlib` (grafiken). HTTP sker enbart via standardbibliotekets `urllib` — `requests` används inte. `pandas` och `pyyaml` installeras i add-on-imagen men importeras inte av koden.
+- **Känd begränsning:** `paramiko` importeras på modulnivå i `src/forecast.py` och `src/optimizer.py` men installeras inte i add-on-imagen. Add-onen kan därför inte starta förrän den importen gjorts lazy (mönstret finns redan i `src/ha_client.py`, som importerar `paramiko` först när SSH-backenden faktiskt används). I utvecklingsmiljön, där SSH-backenden används, är `paramiko` installerat och fungerande.
 - **Home Assistant:** Förutsätter en fungerande Home Assistant-instans med REST-API och följande entiteter:
   - *Priser:* `sensor.nordpool_predbat_import`, `sensor.nordpool_predbat_export`
-  - *Sol & Väder:* Solcast-sensorer, SMHI utetemperaturprognos
-  - *Hus & Värmepump:* Huslast (`sensor.solis_s6_eh1p_house_load` eller motsvarande), NIBE utegivare BT1
-  - *Batteristatus:* `sensor.solis_s6_eh1p_battery_soc`, `sensor.solis_s6_eh1p_battery_voltage`, `sensor.solis_s6_eh1p_battery_power`
-  - *Solis Modbus-styrning:* `number.solis_s6_eh1p_backup_soc`, `number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1`, `time.solis_s6_eh1p_grid_time_of_use_charge_start_slot_1`, `time.solis_s6_eh1p_grid_time_of_use_charge_end_slot_1`, `number.solis_s6_eh1p_peak_max_usable_grid_power`
+  - *Sol & Väder:* Solcast läses ur filen `/homeassistant/solcast_solar/solcast.json` (inte ur en sensor), SMHI via tjänsteanropet `weather.get_forecasts` på `weather.smhi_home`, utetemperatur via `sensor.aktuell_utetemperatur_bt1_40004`
+  - *Hus & Värmepump:* Huslast `sensor.solis_s6_eh1p_household_load_power`, NIBE utegivare BT1
+  - *Batteristatus:* `sensor.solis_s6_eh1p_battery_soc`, `sensor.solis_s6_eh1p_battery_voltage`, `sensor.solis_s6_eh1p_battery_charge_power`, `sensor.solis_s6_eh1p_battery_discharge_power`
+  - *Solis Modbus-styrning:* `number.solis_s6_eh1p_backup_soc`, `switch.grid_time_of_use_charging_period_1`, `number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1`, `number.solis_s6_eh1p_grid_time_of_use_charge_cut_off_soc_slot_1`, `time.solis_s6_eh1p_grid_time_of_use_charge_start_slot_1`, `time.solis_s6_eh1p_grid_time_of_use_charge_end_slot_1`
+  - *Plan- och prognossensorer (skrivs av systemet):* `sensor.batterycontrol_plan_now`, `sensor.batterycontrol_status`, `sensor.batterycontrol_load_forecast_now`, `sensor.batterycontrol_pv_forecast_now`
+  - *Toppspårning:* `input_number.batterycontrol_p1`, `input_number.batterycontrol_p2`, `input_number.batterycontrol_p3` (spegling av `peak_state.json`, `initial: 0.0` — se `src/peak_tracker.py`)
   - *Styrflaggor & Beställningar:* `input_boolean.batterycontrol_active`, `input_boolean.batterycontrol_dry_run`, `input_boolean.ev_charge_order_10kwh`
-  - *Mätare & Elbil:* Nätmätare (`sensor.solis_s6_eh1p_meter_total_active_energy_from_grid`), Elbilseffekt (`sensor.ev_power` i kW), Charge Amps integration (`chargeamps.enable`, `chargeamps.disable`)
+  - *Mätare & Elbil:* Nätmätare `sensor.solis_s6_eh1p_meter_total_active_energy_from_grid` och `..._to_grid`, Elbilseffekt `sensor.ev_power` (i **kW**, inte W), Charge Amps-integrationen (`chargeamps.enable`, `chargeamps.disable`, `chargeamps.set_max_current`)
 
 ---
 
