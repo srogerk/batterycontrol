@@ -20,6 +20,24 @@ FROM ${BUILD_FROM}
 ARG REPO_URL=https://github.com/srogerk/batterycontrol.git
 ARG REPO_REF=main
 
+# Supervisor skickar alltid med versionen som build-arg (se byggkommandot i
+# Supervisors logg: --build-arg BUILD_VERSION=0.6.5). Vi MASte rora den i
+# steget som hamtar kallkoden, annars cachar BuildKit det lagret.
+#
+# Fallan: REPO_REF=main ar samma strang i varje bygge. BuildKit ser identiska
+# ARG-varden och ateranvander lagret "git fetch origin main" fran forra bygget.
+# Imagen far da koden som main pekade pa NAR CACHEN SKAPADES, inte nu. Bygget
+# blir gront, versionen stammer, men koden ar gammal - och ingenting i loggen
+# sager det. Det kostade en felsokningsrunda 2026-11-17: 0.6.4 och 0.6.5
+# inneholl bada src/ fran 0.6.3, medan config.yaml (som Supervisor laser
+# direkt fran repot, utanfor imagen) uppdaterades korrekt. Darfor fungerade
+# homeassistant_api-fixen men inte paths-fixen.
+#
+# BUILD_VERSION i detta RUN ogiltigforklarar lagret vid varje ny version.
+# Satt den INTE utanfor RUN - da cachar BuildKit anda, eftersom ett ARG som
+# inte anvands i ett steg inte paverkar stegets cache-nyckel.
+ARG BUILD_VERSION=dev
+
 # ---------------------------------------------------------------------------
 # VARFOR apk OCH INTE pip FOR numpy/scipy/matplotlib
 #
@@ -58,7 +76,8 @@ RUN pip3 install --no-cache-dir --break-system-packages holidays
 # Steg 3: hamta kallkoden. "git fetch <ref>" loser gren, tagg OCH commit-SHA;
 # "git clone --branch" gor det inte (den vagrar ett SHA, och en ||-fallback
 # klonar da tyst default-grenen sa bygget blir gront med fel kod).
-RUN mkdir -p /app/src-repo \
+RUN echo "hamtar kallkod ${REPO_REF} for version ${BUILD_VERSION}" \
+    && mkdir -p /app/src-repo \
     && cd /app/src-repo \
     && git init -q \
     && git remote add origin "${REPO_URL}" \
@@ -69,6 +88,7 @@ RUN mkdir -p /app/src-repo \
     && mkdir -p /app \
     && cp -r /app/src-repo/src /app/src \
     && cp -r /app/src-repo/web /app/web \
+    && git -C /app/src-repo rev-parse --short HEAD > /app/COMMIT \
     && rm -rf /app/src-repo
 
 ENV TZ=Europe/Stockholm \

@@ -11,7 +11,7 @@
 #
 set -e
 
-echo "[batterycontrol] startar $(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo "[batterycontrol] startar $(date '+%Y-%m-%d %H:%M:%S %Z') (kallkod $(cat /app/COMMIT 2>/dev/null || echo '?'))"
 
 OPTIONS=/data/options.json
 
