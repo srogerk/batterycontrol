@@ -85,8 +85,23 @@ class SupervisorHA:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
                 body = r.read().decode()
         except urllib.error.HTTPError as e:
+            # Logga alltid. Tidigare svaldes felet tyst for GET, sa en 403 fran
+            # Supervisor-proxyn (t.ex. nar homeassistant_api saknas i
+            # config.yaml) sag ut som "ingen data" och varje lasning foll
+            # tillbaka pa sin default. Appen verkade fungera men styrde pa
+            # hittade varden - det kostade en hel felsokningskvart.
+            detail = ""
+            try:
+                detail = e.read().decode()[:200]
+            except Exception:
+                pass
+            print(f"VARNING: HA {method} {path} -> HTTP {e.code} {detail}")
+            if e.code in (401, 403):
+                print("VARNING: behorighetsfel mot HA. I add-on-lage: kontrollera "
+                      "att homeassistant_api: true finns i config.yaml.")
             return None if method == "GET" else f"HTTP {e.code}"
-        except urllib.error.URLError:
+        except urllib.error.URLError as e:
+            print(f"VARNING: HA {method} {path} -> URLError {e.reason}")
             return None if method == "GET" else "URLError"
         if method == "GET":
             try:

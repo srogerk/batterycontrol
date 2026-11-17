@@ -1,5 +1,5 @@
 name: BatteryControl
-version: "0.6.3"
+version: "0.6.4"
 slug: batterycontrol
 description: Kvartsvis batterioptimering (HiGHS LP) mot effekttariff och spotpris
 url: https://github.com/srogerk/batterycontrol
@@ -15,6 +15,14 @@ ingress: true
 ingress_port: 8099
 panel_icon: mdi:battery-sync
 panel_title: BatteryControl
+
+# KRITISKT: utan denna nekar Supervisor-proxyn all atkomst till /core/api/.
+# Appen ar da helt dov - den kan varken lasa sensorer eller skriva prognoser.
+# Felet syns inte som ett fel: Supervisor svarar 403, men SupervisorHA._req
+# svaljer HTTP-fel och returnerar None for GET, sa varje lasning faller
+# tillbaka pa sin default (t.ex. 1500 W huslast). Appen ser ut att fungera
+# men styr pa hittade varden. Darfor maste denna rad vara kvar.
+homeassistant_api: true
 
 # /data är den beständiga ytan (dygnsarkiv, prognostillstånd).
 # config:rw krävs för att skriva dashboarden till /config/www/batterycontrol/
