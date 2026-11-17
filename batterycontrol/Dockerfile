@@ -1,10 +1,10 @@
 ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
-# Källkoden hämtas från GitHub vid build istället för att kopieras in i
-# batterycontrol/. HA bygger bara med batterycontrol/ som kontext, så src/
-# i reporoten nås inte därifrån — och att duplicera koden hit skulle skapa
-# två sanningar som glider isär (exakt felet med .startup.sh).
+# Kallkoden hamtas fran GitHub vid build istallet for att kopieras in i
+# batterycontrol/. HA bygger bara med batterycontrol/ som kontext, sa src/
+# i reporoten nas inte darifran - och att duplicera koden hit skulle skapa
+# tva sanningar som glider isar (exakt felet med .startup.sh).
 #
 # Pinnas till en ref: en gren, en tagg eller ett fullstandigt commit-SHA.
 # main = senaste. En tagg eller ett SHA ger en reproducerbar release.
@@ -20,24 +20,45 @@ FROM ${BUILD_FROM}
 ARG REPO_URL=https://github.com/srogerk/batterycontrol.git
 ARG REPO_REF=main
 
-# Beroendena ligger i imagen - inte i en .startup.sh som kan glomma ett paket.
-# python3 och pip finns redan i basimagen (base-python); darfor inte langre
-# apk-paketen python3/py3-pip/py3-numpy (de blandade apk- och pip-numpy).
-# pandas togs bort 2026-11-18: ingen fil i src/ importerar det.
+# ---------------------------------------------------------------------------
+# VARFOR apk OCH INTE pip FOR numpy/scipy/matplotlib
 #
-# Kallkoden hamtas i samma RUN. "git fetch <ref>" loser gren, tagg OCH
-# commit-SHA; "git clone --branch" gor det inte (den vagrar ett SHA, och en
-# ||-fallback klonar da tyst default-grenen sa bygget blir gront med fel kod).
+# HA-boxen ar en QEMU-VM med CPU-modellen "Common KVM processor". Den saknar
+# SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT/AVX. PyPI:s musllinux-hjul for numpy ar
+# byggda for x86-64-v2 (kraver SSE4.2 + POPCNT) och vagrar ladda:
+#
+#   RuntimeError: NumPy was built with baseline optimizations:
+#   (X86_V2) but your machine doesn't support: (X86_V2).
+#
+# Alpine bygger sina py3-numpy/py3-scipy med "-Dcpu-baseline=none
+# -Dcpu-dispatch=none" - inga ISA-krav alls. apk-paketen ar alltsa det enda
+# som startar pa den har CPU:n. Byt inte tillbaka till pip-hjul utan att
+# forst ha verifierat att hjulen klarar en CPU utan SSE4.2.
+#
+# pandas ar struket: ingen fil i src/ importerar det.
+# holidays finns inte i Alpine (kholidays ar KDE:s lib, inte samma sak) och
+# ar ren python (py3-none-any) - darfor det enda paketet som gar via pip.
+# ---------------------------------------------------------------------------
+
+# Steg 1: systempaket. python3 ur apk ar 3.14; py3-pip ar ett separat paket
+# och maste namnas - annars finns ingen pip3 for holidays.
 RUN apk add --no-cache \
         git \
         tzdata \
-    && pip3 install --no-cache-dir --break-system-packages \
-        numpy \
-        scipy \
-        matplotlib \
-        holidays \
-        pyyaml \
-    && mkdir -p /app/src-repo \
+        python3 \
+        py3-pip \
+        py3-numpy \
+        py3-scipy \
+        py3-matplotlib \
+        py3-yaml
+
+# Steg 2: holidays (ren python, inga binara hjul, ingen ISA-fraga).
+RUN pip3 install --no-cache-dir --break-system-packages holidays
+
+# Steg 3: hamta kallkoden. "git fetch <ref>" loser gren, tagg OCH commit-SHA;
+# "git clone --branch" gor det inte (den vagrar ett SHA, och en ||-fallback
+# klonar da tyst default-grenen sa bygget blir gront med fel kod).
+RUN mkdir -p /app/src-repo \
     && cd /app/src-repo \
     && git init -q \
     && git remote add origin "${REPO_URL}" \

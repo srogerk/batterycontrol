@@ -1,14 +1,21 @@
-# Basimage for bygget. Utan denna fil anvander Supervisor en bart Alpine-
-# image utan python/pip, och Dockerfile ns `pip3 install` faller direkt.
+# Basimage for bygget. Utan build.yaml anvander Supervisor en bar Alpine-bas
+# UTAN python och UTAN bashio, och Dockerfile'ns pip-install faller direkt.
 #
-# base-python finns fran Home Assistant och innehaller python3, pip och
-# bashio (som run.sh:s `#!/usr/bin/with-contenv bashio` kraver).
+# VALET AV BAS AR INTE KOSMETISKT - se kommentaren i Dockerfile.
+# home-assistant/base (Alpine, utan python) valjs medvetet framfor
+# home-assistant/base-python. Skalet ar att HA-boxen ar en QEMU-VM med
+# CPU-modellen "Common KVM processor" som saknar SSE3/SSSE3/SSE4.2/AVX.
+# PyPI:s musllinux-hjul for numpy ar byggda for x86-64-v2 (kraver SSE4.2 +
+# POPCNT) och vagrar starta dar:
 #
-# Viktigt: numpy/scipy/matplotlib/pyyaml publiceras som musllinux-hjul for
-# cp313 och uppat. Alpine 3.22 + python 3.13 ar den kombination som bevisligen
-# har hjul for alla fyra - valj inte en aldre python utan att kontrollera
-# PyPI forst, da blir det kallkodskompilering (langsamt och minneskravande
-# pa en box med 3,8 GB RAM).
+#   RuntimeError: NumPy was built with baseline optimizations:
+#   (X86_V2) but your machine doesn't support: (X86_V2).
+#
+# Alpine bygger sina egna py3-numpy/py3-scipy med
+# "-Dcpu-baseline=none -Dcpu-dispatch=none", dvs helt utan ISA-krav. Darfor
+# apk-paket i stallet for pip-hjul for numpy/scipy/matplotlib.
+#
+# Alpine 3.24 ar vald for att den har python 3.14 och aktuella paketversioner.
 build_from:
-  amd64: ghcr.io/home-assistant/base-python:3.13-alpine3.22
-  aarch64: ghcr.io/home-assistant/base-python:3.13-alpine3.22
+  amd64: ghcr.io/home-assistant/base:3.24
+  aarch64: ghcr.io/home-assistant/base:3.24
