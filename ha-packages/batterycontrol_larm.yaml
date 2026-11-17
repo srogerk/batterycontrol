@@ -1,0 +1,155 @@
+# ==============================================================================
+# BatteryControl - larm nar kvartsloopen slutar publicera
+#
+# Skapad 2026-11-17 av Olle. NY fil - automations.yaml och befintliga paket
+# ror vi inte.
+#
+# VARFOR: appen (v0.7.0) har s6-longrun, sa en krasch startas om automatiskt.
+# Men s6 gor det tyst, och s6 ger upp om tjansten kraschar tillrackligt ofta
+# pa kort tid. Dessutom finns tva fellagen s6 INTE fangar:
+#   - optimeringen hangar sig utan att krascha (processen lever, ingen plan)
+#   - HA Core ar nere lange nog att appen inte kan publicera
+# I alla tre fallen star styrningen still medan allt ser normalt ut.
+#
+# HUR: vi tittar pa sensor.batterycontrol_plan_now. Appen publicerar den varje
+# kvart (4 ganger i timmen), och varje publicering flyttar last_updated -
+# aven nar vardet ar detsamma, eftersom attributen varierar (solve_time_seconds,
+# plan_48h med glidande tidsstamplar, day_eft_prognos).
+#   * 30 min utan publicering = 2 missade kvartar. Da ar det ett fel.
+#   * 10 min hade varit for tight: en langsammare korning ar inte ett fel.
+#
+# GRACE EFTER HA-OMSTART: vid omstart aterstalls sensorn fran recorder med sin
+# gamla last_updated, sa den ser "gammal" ut direkt trots att appen ar frisk.
+# Darfor kraver larmet att HA varit uppe i minst 30 min (input_datetime nedan,
+# som automations satter vid varje start). Utan den fristen skulle varje
+# omstart ge ett falsklarm.
+#
+# LATCH: input_boolean.batterycontrol_tystnad_larm hindrar larmet att upprepas
+# var 5:e minut medan felet pagar - samma dampning som run_loop_watchdog.sh
+# anvander. Nar loopen ar tillbaka skickas ett kvitto och latchen slappner.
+#
+# DETTA AR EN OBSERVATOR, INTE EN TRIGGER. Den kan inte starta eller stanga av
+# styrningen, bara saga till. Styrningen ska aldrig bero pa HA:s
+# automationsmotor.
+# ==============================================================================
+
+input_datetime:
+  batterycontrol_uppstart:
+    name: "BatteryControl - HA startade"
+    has_date: true
+    has_time: true
+    icon: mdi:clock-start
+
+input_boolean:
+  batterycontrol_tystnad_larm:
+    name: "BatteryControl - tystnadslarm aktivt"
+    icon: mdi:bell-alert
+    initial: off
+
+template:
+  - binary_sensor:
+      - name: "BatteryControl kvartsloop tyst"
+        unique_id: batterycontrol_loop_tystnad
+        device_class: problem
+        icon: >-
+          {{ 'mdi:alert-octagon' if is_state('binary_sensor.batterycontrol_kvartsloop_tyst', 'on')
+             else 'mdi:check-circle-outline' }}
+        state: >-
+          {# Fristen raknas forst: efter en HA-omstart ar allt annat brus. #}
+          {% set uppstart = as_timestamp(states('input_datetime.batterycontrol_uppstart'), 0) %}
+          {% set uppe_min = (as_timestamp(now()) - uppstart) / 60 if uppstart > 0 else 0 %}
+          {% if uppe_min <= 30 %}
+            false
+          {% else %}
+            {% set sensorn = states.sensor.batterycontrol_plan_now %}
+            {% if sensorn is none or sensorn.last_updated is none %}
+              {# Sensorn finns inte alls, och HA har varit uppe i over 30 min.
+                 Det ar ett fel, inte ett oskrivet blad - appen ska ha
+                 publicerat en plan inom en kvart fran start. TIG INTE har;
+                 det var precis sa den har typen av fel brukade forsvinna. #}
+              true
+            {% else %}
+              {% set tyst_min = (as_timestamp(now()) - as_timestamp(sensorn.last_updated)) / 60 %}
+              {{ tyst_min > 30 }}
+            {% endif %}
+          {% endif %}
+
+automation:
+  - id: batterycontrol_notera_uppstart
+    alias: "BatteryControl - notera HA-uppstart"
+    description: >-
+      Startar fristen. Utan den skulle sensorn se gammal ut direkt efter en
+      HA-omstart och ge falsklarm.
+    mode: single
+    trigger:
+      - platform: homeassistant
+        event: start
+    action:
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.batterycontrol_uppstart
+        data:
+          timestamp: "{{ now().timestamp() }}"
+
+  - id: batterycontrol_larm_tyst_loop
+    alias: "BatteryControl - LARM: kvartsloopen star still"
+    description: >-
+      Larmar nar planen inte publicerats pa 30 min. Upprepas inte medan felet
+      pagar - latchen slapps nar loopen ar tillbaka.
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.batterycontrol_kvartsloop_tyst
+        to: "on"
+        for: "00:00:10"
+    condition:
+      - condition: state
+        entity_id: input_boolean.batterycontrol_tystnad_larm
+        state: "off"
+    action:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.batterycontrol_tystnad_larm
+      - service: persistent_notification.create
+        data:
+          title: "BatteryControl: styrningen star still"
+          notification_id: batterycontrol_tystnad
+          message: >-
+            Planen har inte publicerats sedan
+            {{ states.sensor.batterycontrol_plan_now.last_updated.strftime('%H:%M') }}.
+            Kontrollera appens logg: Installningar -> Appar -> BatteryControl -> Logg.
+            Senaste korda kvart finns i loggen som "=== Startar kvartsoptimering".
+      - service: notify.mobile_app_eb2103
+        data:
+          title: "BatteryControl star still"
+          message: >-
+            Ingen plan sedan {{ states.sensor.batterycontrol_plan_now.last_updated.strftime('%H:%M') }}.
+            Styrningen ar sannolikt av. Se appens logg.
+
+  - id: batterycontrol_kvitto_loop_frisk
+    alias: "BatteryControl - kvitto: loopen ar tillbaka"
+    description: >-
+      Skickar ett kvitto nar planen publiceras igen, sa tystnaden inte behover
+      tolkas. Slapper latchen.
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.batterycontrol_kvartsloop_tyst
+        to: "off"
+    condition:
+      - condition: state
+        entity_id: input_boolean.batterycontrol_tystnad_larm
+        state: "on"
+    action:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.batterycontrol_tystnad_larm
+      - service: persistent_notification.dismiss
+        data:
+          notification_id: batterycontrol_tystnad
+      - service: notify.mobile_app_eb2103
+        data:
+          title: "BatteryControl ar tillbaka"
+          message: >-
+            Planen publiceras igen sedan
+            {{ states.sensor.batterycontrol_plan_now.last_updated.strftime('%H:%M') }}.
