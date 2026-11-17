@@ -19,12 +19,8 @@ import time
 import datetime
 import zoneinfo
 import holidays
-import hmac
-import hashlib
-import base64
 import numpy as np
 import scipy.optimize
-import paramiko
 
 SE_HOLIDAYS = holidays.Sweden(years=[2026, 2027])
 
@@ -55,21 +51,6 @@ def get_p_dag_floor_kw(dt: datetime.datetime) -> float:
     elif d.month in [11, 2, 3]:
         return 1.3
     return 0.0
-
-HA_HOST = "10.12.22.12"
-HA_USER = "root"
-SSH_KEY = "/workspace/id_ed25519"
-REFRESH_TOKEN_ID = "2e524fc4f7254527b734d719720a6230"
-JWT_KEY = "4bf3f2bb0d22f9220eb4ca4a90263b81b071c05b86a50e27104dcfe392ee49b71840a81f8bedab36d28450d428e380021d34da8c9a79f9570bc5f7f146b77826"
-
-def generate_ha_token():
-    header = {"alg": "HS256", "typ": "JWT"}
-    now = int(time.time())
-    payload = {"iss": REFRESH_TOKEN_ID, "iat": now, "exp": now + 3600 * 24 * 30}
-    b64 = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")
-    signing_input = b64(json.dumps(header, separators=(",", ":")).encode()) + "." + b64(json.dumps(payload, separators=(",", ":")).encode())
-    sig = hmac.new(JWT_KEY.encode(), signing_input.encode(), hashlib.sha256).digest()
-    return signing_input + "." + b64(sig)
 
 class HAPriceAndStateClient:
     """

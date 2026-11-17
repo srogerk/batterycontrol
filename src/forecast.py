@@ -10,17 +10,10 @@ import json
 import time
 import datetime
 import zoneinfo
-import hmac
-import hashlib
-import base64
-import paramiko
 
-# Konstanter för HA-åtkomst
-HA_HOST = "10.12.22.12"
-HA_USER = "root"
-SSH_KEY = "/workspace/id_ed25519"
-REFRESH_TOKEN_ID = "2e524fc4f7254527b734d719720a6230"
-JWT_KEY = "4bf3f2bb0d22f9220eb4ca4a90263b81b071c05b86a50e27104dcfe392ee49b71840a81f8bedab36d28450d428e380021d34da8c9a79f9570bc5f7f146b77826"
+# HA-atkomst skots av src/ha_client.py (get_client). Inga hemligheter har.
+
+
 def _persistence_file():
     """Tillståndet måste överleva add-on-uppdateringar -> /data i add-on-läge."""
     try:
@@ -34,19 +27,6 @@ def _persistence_file():
 
 
 PERSISTENCE_FILE = _persistence_file()
-
-def generate_ha_token():
-    header = {"alg": "HS256", "typ": "JWT"}
-    now = int(time.time())
-    payload = {
-        "iss": REFRESH_TOKEN_ID,
-        "iat": now,
-        "exp": now + 3600 * 24 * 30  # 30 dagar
-    }
-    b64 = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")
-    signing_input = b64(json.dumps(header, separators=(",", ":")).encode()) + "." + b64(json.dumps(payload, separators=(",", ":")).encode())
-    sig = hmac.new(JWT_KEY.encode(), signing_input.encode(), hashlib.sha256).digest()
-    return signing_input + "." + b64(sig)
 
 class HAForecastClient:
     """

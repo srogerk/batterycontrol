@@ -35,10 +35,10 @@ except ImportError:  # importerad med src/ på sys.path
 
 TIMEOUT = 30
 
-# Fallback när HA_JWT_KEY inte finns i miljön. Bevarar nuvarande produktionsbeteende
-# exakt — flytta till secret store och sätt HA_JWT_KEY i miljön när det passar.
-_DEFAULT_JWT_KEY = "4bf3f2bb0d22f9220eb4ca4a90263b81b071c05b86a50e27104dcfe392ee49b71840a81f8bedab36d28450d428e380021d34da8c9a79f9570bc5f7f146b77826"
-_DEFAULT_REFRESH_TOKEN_ID = "2e524fc4f7254527b734d719720a6230"
+# Inga hemligheter i koden. HA-atkomst kommer fran miljon:
+#   HA_TOKEN             fardig long-lived-token (foredraget)
+#   HA_REFRESH_TOKEN_ID + HA_JWT_KEY   signera egen HS256-token (fallback)
+# Bada satts i secret-valvet, aldrig i git.
 
 
 def _utc_z(value):
@@ -240,14 +240,28 @@ class SshHA:
 
 
 def _generate_ha_token():
-    """HS256-JWT ur refresh-token-id + nyckel. Hemligheten läses ur miljön om den finns."""
+    """Fardig token ur HA_TOKEN, annars HS256-JWT ur refresh-token-id + nyckel.
+
+    Foredraget lage ar HA_TOKEN: en fardig long-lived-token som HA redan har
+    signerat. Den kan inte anvandas for att mint:a fler tokens, till skillnad
+    fran signeringsnyckeln, sa den ar den mindre kansliga hemligheten.
+    """
     import base64
     import hashlib
     import hmac
     import time
 
-    rid = os.environ.get("HA_REFRESH_TOKEN_ID") or _DEFAULT_REFRESH_TOKEN_ID
-    key = os.environ.get("HA_JWT_KEY") or _DEFAULT_JWT_KEY
+    ready = os.environ.get("HA_TOKEN")
+    if ready:
+        return ready.strip()
+
+    rid = os.environ.get("HA_REFRESH_TOKEN_ID")
+    key = os.environ.get("HA_JWT_KEY")
+    if not (rid and key):
+        raise RuntimeError(
+            "Ingen HA-atkomst: satt HA_TOKEN (fardig token) eller "
+            "HA_REFRESH_TOKEN_ID + HA_JWT_KEY i miljon."
+        )
 
     header = {"alg": "HS256", "typ": "JWT"}
     now = int(time.time())
