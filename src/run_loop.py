@@ -33,6 +33,15 @@ def log(msg):
 
 def main():
     log("=== Startar kvartsoptimering (Optimizer v2) ===")
+    # Logga vilka ytor som faktiskt anvands. I add-on-lage ar skillnaden
+    # mellan /data och /app/web hela skillnaden mellan bestandigt och borta
+    # vid nasta omstart - och den framgar inte av nagon annan loggrad.
+    try:
+        import src.paths as _paths
+        log(f"Ytor: data={_paths.data_dir()} config={_paths.config_dir()}")
+    except Exception as _e:
+        log(f"FEL: kunde inte avgora data/config-katalog: {_e}")
+        sys.exit(1)
     
     # 1. Prognos
     try:

@@ -43,6 +43,19 @@ def data_dir():
         return override
     if _writable("/data"):
         return "/data"
+    # I add-on-lage ar /data den ENDA bestandiga ytan. Att tyst falla tillbaka
+    # pa WEB_DIR (/app/web) dar vore varre an att krascha: /app/web ligger i
+    # containerns oversta lager och skrivs over vid varje omstart och varje
+    # uppdatering. peak_state.json skulle da forsvinna tyst, peak_trackern
+    # migrera om fran HA varje kvart, och ingenstans syns att nagot ar fel -
+    # exakt samma klass av tyst fel som de hardkodade P1/P2/P3-fallbacken.
+    # Krascha hellre: da star det i loggen.
+    if is_addon():
+        raise RuntimeError(
+            "Add-on-lage men /data ar inte skrivbar. /data ar den enda "
+            "bestandiga ytan - att skriva state dit i /app/web vore att tappa "
+            "den vid nasta omstart. Kontrollera att mappen ar monterad."
+        )
     return WEB_DIR
 
 
