@@ -1,6 +1,7 @@
 # SPEC: Effektregulatorn — batteristyrning mot effektavgift (14 kW-avtal)
 
-*Status: v1.1, 2026-10-27 (GE-svar av Roger infogade). Simulerad mot 2025 års
+*Status: v1.2, 2026-11-19 (urladdningsaktuatorn `backup_soc` mätt och verifierad,
+se §2.4). v1.1, 2026-10-27 (GE-svar av Roger infogade). Simulerad mot 2025 års
 timdata (101 vinter-vardagar). Projekt: effekttariff-batteristyrning.
 Skriven för Roger + implementering i HA.*
 
@@ -80,6 +81,153 @@ TOU-laddning under klamp — mjukvaruregeln EV+ladd+hus ≤ 13 kW håller trimdj
 ### Lager 2 — Effektregulator 07–20, vardagar 1 nov–31 mars
 Se §3. Utanför fönstret: **fritt läge** — spotarbitrage, EV-laddning, bastu.
 Endast Lager 0 gäller där.
+
+---
+
+### 2.4 Urladdningsaktuatorn `backup_soc` — mätt 2026-11-19
+
+**Detta avsnitt ersätter den tidigare beskrivningen av `backup_soc` som enbart en
+"spärr".** Mätningen visar att registret är ett **börvärde** som verkar i två riktningar,
+och att riktningen avgörs av bit 5 i register 43110.
+
+#### Mätbeviset (kausalt, inte korrelation)
+
+Test 22:20 med `switch.allow_grid_to_charge_the_battery` **avstängd** (bit 5 = 0,
+`sw_value` 305 → 273) — då kan ingen nätladdning ske, och golvet observeras ensamt:
+
+| tid | `backup_soc` | bit 5 | SOC | urladdning | nätimport | huslast |
+|---|---|---|---|---|---|---|
+| 22:19:55 | 15 | på | 17 % | 2 767 W | 0 W | 2 642 W |
+| **22:20:09** | **19** | **av** | 17 % | **672 W** | **2 635 W** | 3 232 W |
+| 22:20:23 | 15 | av | 17 % | 0 W | 50 W | 2 575 W |
+| 22:20:30 | 15 | av | 17 % | **2 742 W** | 0 W | 2 636 W |
+
+Golv **över** SOC ⇒ urladdningen stryps och nätet tar huslasten. Golv **under** SOC
+igen ⇒ urladdningen återupptas inom samma minut. `backup_soc` är alltså
+**urladdningsgolvet i Self-Use**, och det verkar kontinuerligt (inte binärt).
+
+#### Samma värde är också ett laddningstak
+
+Med bit 5 **på** (normalläget, `allow_grid_to_charge_the_battery` = on) blir samma
+börvärde ett **påfyllningsmål**: invertern laddar batteriet **från nätet** upp till
+`backup_soc`. Uppmätt samma kväll:
+
+| tid | `backup_soc` | SOC | nätladdning | import |
+|---|---|---|---|---|
+| 20:39:32 | 95 | 27 % | 8 939 W | 12 753 W |
+| 20:44:32 | 30 | 27 % | 7 442 → 9 068 W | 12 779 W |
+| 22:15:08 | 21 → 18 | 18 % | 8 263 W | 12 487 W |
+| 22:16:04 | 18 (= SOC) | 18 % | 9 235 W | 12 705 W |
+
+**Slutsats:** `backup_soc` är **ett börvärde, inte två funktioner**. Ligger börvärdet
+över aktuell SOC fyller invertern på (om bit 5 tillåter nätladdning), och under
+börvärdet urladdar den. Det förklarar varför tidigare tester såg ut att motsäga
+varandra: **bit 5 är alltid på i normalläget, så laddbeteendet maskerade alltid
+golvtestet.**
+
+#### Varför det inte kunde avgöras tidigare
+
+Tidigare hypotesprövning (2026-11-19 20:30–20:36) satte golv 95/100 med urladdning
+pågående och såg **ingen** effekt — varken stopp eller laddning. Skillnaden mot de
+fungerande fallen är **bit 1 (TOU)**: `sw_value` var då 307 (bit 1 på), medan de
+fungerande fallen hade 305. TOU-läget tycks undertrycka reservpåfyllningen. Det är
+en hypotes, inte en mätning — se §8.
+
+#### Tre konsekvenser för regulatorn
+
+1. **Golvet är den urladdningsaktuator vi letat efter.** Det finns alltså en
+   kontinuerlig urladdningskanal — orden "urladdning är inte styrd, bara tillåten
+   eller förbjuden" i `GLOBAL-OPTIMERING-MODELL.md` §3.8 är för starka och ska
+   nyanseras: Self-Use parerar huslasten, men **golvet bestämmer hur mycket av
+   huslasten batteriet får ta**.
+2. **Bit 5 måste hanteras uttryckligen.** Så länge bit 5 är på är varje höjning av
+   `backup_soc` över SOC en **nätladdningsorder**. Regulatorn får aldrig sätta ett
+   golv över uppmätt SOC utan att veta att den köper energi.
+3. ~~**Avrundningen är en risk.**~~ **MOTBEVISAD 2026-11-21 — se §2.4a.**
+   `round()` var inte boven. SOC-sensorn (input-register 33139) är ett **heltal**:
+   1 326 mätpunkter 14–21 nov innehöll inte ett enda decimalvärde, så `round()`,
+   `floor()` och `int()` ger identiskt resultat. Rådet att byta till `floor()`
+   hade varit en **no-op**. Felet satt i att `golv = SOC` överhuvudtaget användes
+   som "lås" — se §2.4a.
+
+### 2.4a Ett "håll" kan inte uttryckas i `backup_soc` — mätt 2026-11-21
+
+§2.4 visade *att* `backup_soc` är ett börvärde i två riktningar. Mätningen 21 nov
+visar **varför det gör "lås vid nuvarande SOC" till en nätladdningsorder**, och
+varför felet låg i drift i veckor utan att synas.
+
+#### Mekanismen
+
+SOC-sensorn (input-register 33139) har **1 % upplösning och är ett heltal**
+(1 326 mätpunkter 14–21 nov, noll decimalvärden). Det **visade** värdet är en
+**övre gräns** för det interna värdet — invertern överskjuter ett helt steg innan
+den ser att målet är nått (uppmätt 0,97 % medel över 28 fulla steg).
+
+Därför finns **inget** värde på 43024 som betyder "håll", så länge bit 5 är på:
+
+| golv vs SOC | resultat |
+|---|---|
+| golv **>** SOC | nätladdning upp till golvet (reservvägen, ej effektreglerad) |
+| golv **<** SOC | Self-Use laddar ur ned mot golvet |
+| golv **=** SOC | **omöjligt att träffa** — det visade värdet ligger på eller över det verkliga, så det hamnar i praktiken över |
+
+**En håll-funktion måste därför uttryckas i bit 5, inte i golvet.** Det är den
+egentliga motsägelsen — inte avrundningen.
+
+#### Vad felet kostade (mätt i drift)
+
+Koden skrev i vänteläge `golv = round(SOC)` för att "låsa" batteriet. Varje kvart
+blev därför en laddorder, och reservvägen går på `43012` = 50,0 A (appen skriver
+aldrig det registret) — alltså okontrollerad effekt.
+
+| mått | värde |
+|---|---|
+| Laddstötar 2026-11-21 | **44**, mot 0–7 per dag veckan innan |
+| Andel kvartar 03:00–10:00 med stöt | **93 %** (26 av 28); utan stöt endast 03:00 och 03:15 |
+| Energi per stöt | 0,19–0,30 kWh = 0,75–1,19 % av batteriet |
+| Toppeffekt | 12 282 W import (11:01) |
+| Fördröjning från appens skrivning | 4,9–15,6 s, 13 av 13 mätta fall |
+| SOC-förlopp | 12 → 50 % utan att planen någon gång begärde nätladdning |
+
+Att det visade SOC-värdet är systematiskt **på eller över** det verkliga bevisas av
+att 93 % av kvartarna gav en stöt: vore det `round()` skulle bara ~50 % göra det.
+
+#### Regulatorns kontrakt (gäller från v0.7.2)
+
+- **bit 5** = får batteriet laddas från nätet överhuvudtaget. På **endast** när
+  planen faktiskt vill nätladda.
+- **43024** = urladdningsgolv. Ett högt golv är ofarligt när bit 5 är av — det kan
+  bara strypa urladdning.
+- Vid låsning skrivs först `SAFE_FLOOR = 15` (ofarligt även med bit 5 på), därefter
+  stängs bit 5, sist sätts mål-golvet. Skälet till den ordningen är att
+  skrivlatenserna är **omvända**: 43110 upp till ~40 s, 43024 ~5 s. "Stäng kranen
+  först" hade därför inte räckt — golvet hade landat ~35 s *före* kranen och
+  lämnat exakt det fönster som gav 8–10 kW. Att aldrig skriva ett farligt värde är
+  det som håller, oavsett latens.
+- Nedskrivningen till 15 sker bara när bit 5 **kan** vara öppen (bekräftat på, eller
+  okänt läge). Är den bekräftat av rörs inget — annars svänger golvet 52 → 15 → 51
+  varje kvart och lämnar urladdningsgolvet på 15 i ~5 s (fångat i drift 12:15:01,
+  rättat i 0.7.2).
+
+#### Öppen fråga som måste mätas före nästa ingrepp
+
+**Kräver TOU-nattladdningen (slot 1) att bit 5 är på?** Om ja är priset för att
+stänga bit 5 för högt och lösningen måste tänkas om. Mätt: slot 1 står på
+cut-off SOC 100 %, 05:30–06:00, men **strömmen är 0 A** eftersom planen inte vill
+ladda — alltså är vägen ännu inte prövad i skarpt läge. Se §8 p.7.
+
+---
+
+#### Gränsen för vad som är mätt
+
+Allt ovan gäller **Self-Use + Reserve/Backup** (bit 0+4, `sw_value` 305). I **rent
+Self-Use** (bit 4 av, `sw_value` 289) gav golv 95 ingen effekt alls vid SOC 27 — utan
+Reserve-läget har `backup_soc` ingen funktion. Regulatorn ska därför köra i
+Self-Use + Reserve/Backup.
+
+`overdischarge_soc` (register **43011**, spegel 33213) är **inte** ett reglage: satt till 38 hölls det
+~75 s och återgick sedan till 14 utan åtgärd. Invertern/BMS äger registret, och det
+är detta värde (14 %) som stoppade batteriet 14:50 i stället för vårt golv på 15.
 
 ---
 
@@ -172,15 +320,24 @@ Referenser: oförändrat 4 353 kr, endast EV-flytt 3 082 kr.
 
 | Växel | Entity | Not |
 |---|---|---|
+| **Urladdningsgolv** | `number.solis_s6_eh1p_backup_soc` (reg 43024) | **Verifierad 2026-11-19, se §2.4.** Börvärde: under värdet urladdar batteriet, över värdet laddar det — från nätet om bit 5 tillåter. 0–100 %, steg 1. |
+| **Nätladdningens tillstånd** | `switch.allow_grid_to_charge_the_battery` (bit 5, reg 43110) | **Måste hanteras uttryckligen.** På i normalläget ⇒ varje höjning av `backup_soc` över SOC är en nätladdningsorder. Av ⇒ golvet blir envägs (bara urladdningsstopp). |
+| Arbetsläge | `select.work_mode` (reg 43110) | Måste vara **Self-Use + Reserve/Backup** (bit 0+4). I rent Self-Use har `backup_soc` ingen funktion. |
 | Laddström batteri | `number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_2` | DC-ampere (~0,26 kW/A vid 256 V); 39 A ≈ 10 kW |
 | Slot-fönster | `time.solis_s6_eh1p_grid_time_of_use_charge_{start,end}_slot_2` | skrivs med `time.set_value` |
 | Slot på/av | `switch.grid_time_of_use_charging_period_2` | |
 | Laddstopp SoC | `number.solis_s6_eh1p_grid_time_of_use_charge_cut_off_soc_slot_2` | |
-| Peak-shaving | `switch.battery_forcecharge_peakshaving`, `number.solis_s6_eh1p_peak_max_usable_grid_power` | Lager 0, cap 13 000 W |
+| Peak-shaving | `switch.grid_peak_shaving_power_enable` (bit 7, reg 43483), `number.solis_s6_eh1p_peak_max_usable_grid_power` (reg 43488), `number.solis_s6_eh1p_peak_baseline_soc` (reg 43487) | Lager 0, cap 13 000 W, bas 75 %. **Oprövat som reglerande importtak** — se §8 p. 7. |
 | Predbat-läge | `select.predbat_mode` | "Monitor" = pausat, återställ "Control charge & discharge" |
 | Mätning | `sensor.grid_import_power`, `sensor.ev_power`, `sensor.battery_power_charge`/`_discharge`, `sensor.battery_soc`, `sensor.household_power_kw` | |
 | Batteritak | `sensor.predbat_solis_modbus_0_{charge,discharge}_rate` (8 000 W) | batterisida; TOU-slotar kan gå över |
 | RC-registret | `number.solis_s6_eh1p_rc_force_battery_charge_power`, `select.rc_force_charge_discharge` | **fungerar men FÖRBJUDEN** — RC-force slåss mot peak-shaving (21/10: import 18,0 kW, laddningen oscillerade). ~30 s skrivlatens på selecten. Använd TOU-slotar |
+
+**Bitmönster i `sensor.solis_s6_eh1p_storage_control_switch_value` (reg 43110), verifierade
+2026-11-19:** `305` = bitar 0,4,5,8 (Self-Use + Reserve/Backup, normalläge) · `307` = 0,1,4,5,8
+(samma **med** TOU, bit 1) · `291` = 0,1,5,8 (Reserve av) · `289` = 0,5,8 (rent Self-Use) ·
+`273` = 0,4,8 (bit 5 avstängd — används i §2.4-testet). Bit 8
+(`battery_forcecharge_peakshaving`) är en **oberoende modifierare** och står på i alla lägen.
 
 EV: Charge Amps (hass-chargeamps) — styrkälla app/HA? (öppen fråga).
 API: `https://ha.hv39.se/api`, token i `/workspace/tmp/ha_token`.
@@ -199,7 +356,30 @@ API: `https://ha.hv39.se/api`, token i `/workspace/tmp/ha_token`.
 ## 8. Öppna frågor
 1. 3-ggrs-regeln: per timme eller per dygn?
 2. 24/31 dec — räknas som vardagar?
-3. Effektavgift: brutto (import) eller netto efter export? (sannolikt brutto)
-4. Exakt startdatum för effektmätningen (1/11?)
-5. Kan peak-shavingen klampa batteriladdning? (testas 26/10)
+3. ~~Effektavgift: brutto (import) eller netto efter export?~~ **Besvarat 2026-10-27: brutto.**
+4. Exakt startdatum för effektmätningen (1/11?) — **besvarat: 1/11-2026, första debiterade
+   timme måndag 2/11 kl 07:00.**
+5. ~~Kan peak-shavingen klampa batteriladdning?~~ **Besvarat 26/10: ja, på TOU-vägen.**
 6. TOU-laddning flackar (21→22/10) — stabil grund krävs för Lager 1.
+7. **Nytt 2026-11-19: kräver TOU-nattladdningen att bit 5 är på?** Om bit 5 kan stängas av
+   blir `backup_soc` ett rent envägsreglage utan nätladdningsrisk. Men om TOU-laddningen
+   i så fall slutar fungera är priset för högt. **Måste mätas innan något ändras.**
+   **Uppdatering 2026-11-21:** frågan är nu **driftkritisk**, se §2.4a. Regulatorn
+   håller bit 5 av i vänteläge, så nästa gång planen begär nätladdning prövas vägen
+   automatiskt — men det är ingen kontrollerad mätning. Ett avläst läge duger inte:
+   slot 1 står på cut-off 100 % och 05:30–06:00 men med **ström 0 A**, så vägen har
+   ännu inte gått skarpt. Kontrollerat test: sätt bit 5 av, tvinga slot 1 till känd
+   ström i ett fönster, mät om laddning uteblir.
+8. **Nytt 2026-11-19: undertrycker bit 1 (TOU) reservpåfyllningen?** Fallen 20:30–20:36
+   (`sw_value` 307, bit 1 på) visade varken urladdningsstopp eller laddning, medan
+   20:39 och framåt (305, bit 1 av) fungerade. Hypotes, inte mätning.
+9. **Nytt 2026-11-19: reglerar bit 7 + `peak_max_usable_grid_power` nätimporten
+   kontinuerligt?** Fortfarande oprövat. Kvällens tester var ogiltiga eftersom importen
+   redan var 0 — ett importtak kan bara observeras när det finns import att begränsa.
+   Giltigt test: ladda batteriet via TOU med ström **över** capet (bevisat väg från
+   26–27/10), eller sätt en känd huslast över taket och mät om importen stannar vid capet.
+
+**Formel för nästa kvarts golv (inför implementering):** om bit 5 behålls på måste
+regulatorn räkna kostnaden för påfyllningen innan den höjer golvet. Höjning med ΔSOC
+kostar `ΔSOC/100 × batterikapacitet` kWh nätenergi till aktuellt spotpris, och den
+energin är förbrukad oavsett om den någonsin används för att kapa en topp.

@@ -220,19 +220,63 @@ måste beskrivas, annars ser modellen ut att styra något den inte styr.
 | Planens storhet | Verkställs genom | Karaktär |
 |---|---|---|
 | **Nätladdning** `Σ E_grid_batt[i]` | `number.solis_s6_eh1p_grid_time_of_use_charge_battery_current_slot_1` (TOU Slot 1) | Direkt. Effekten räknas om till ampere via batterispänningen och fördelas jämnt över kvartet. |
-| **Urladdning** `E_batt_load` | `number.solis_s6_eh1p_backup_soc` | **Indirekt.** Ingen urladdningskanal finns. Spärren sätts till aktuell SOC för att stänga av Self-Use, eller till 15 % för att släppa den fri. |
+| **Urladdning** `E_batt_load` | `number.solis_s6_eh1p_backup_soc` | **Indirekt men kontinuerlig** — se rättelsen nedan. Ett börvärde i procent: under värdet urladdar batteriet, över värdet laddar det. |
 | **Elbilsladdning** | `chargeamps.enable` / `disable` + `set_max_current` | Direkt, fast 8 A. |
 
-**Urladdning är alltså inte styrd, den är tillåten eller förbjuden.** Växelriktaren kör
-Self-Use och parerar huslasten själv ner till `backup_soc`-golvet. Modellens urladdningsvariabel
-blir därför ett *binärt* beslut i praktiken — "släpp Self-Use fri eller inte" — medan LP:n
-räknar på den som en kontinuerlig mängd. Det är en medveten förenkling: Self-Use parerar
-transienter som modellen inte ser (spis, kaffebryggare), vilket är önskvärt under tariffen
-(§4.8) men gör att den faktiska urladdningen kan avvika från planen.
+**Urladdningen är styrd — men i SOC, inte i kW.** (Rättat 2026-11-19 efter mätning;
+tidigare stod här att urladdning bara var "tillåten eller förbjuden", vilket är för starkt.)
 
-**Konsekvens för modellens giltighet:** laddning är exakt styrbar, urladdning är en
-övre gräns. Planens urladdningssiffror ska läsas som "så mycket får batteriet bidra", inte
-"så mycket kommer det att bidra".
+Växelriktaren kör Self-Use och parerar huslasten själv. `backup_soc` sätter **hur mycket
+av huslasten batteriet får ta**: ligger börvärdet under aktuell SOC urladdar batteriet ned
+mot värdet, ligger det över laddar invertern upp mot värdet — från nätet om bit 5
+(`allow_grid_to_charge_the_battery`, register 43110) tillåter det, vilket den gör i
+normalläget. Mätt kausalt 2026-11-19 22:20 med bit 5 avstängd: golv 15 → 19 vid SOC 17
+sänkte urladdningen från 2 767 W till 672 W; golv tillbaka till 15 återställde den till
+2 742 W inom samma minut. Fullständigt mätbevis i `SPEC-effektregulator.md` §2.4.
+
+**Konsekvens för LP-modellen:** urladdningsvariabeln är styrbar i **nivå** (SOC-börvärde)
+men inte i **momentan effekt** — Self-Use parerar transienter som modellen inte ser (spis,
+kaffebryckare). Modellen kan alltså styra den **ackumulerade energin** över ett fönster,
+men inte ögonblickseffekten. Det gör modellen giltig som energibudget och otillräcklig som
+effektregulator: för att hålla en timmedeleffekt under ett tak krävs dessutom en yttre
+kvartsloop som justerar börvärdet mot uppmätt import.
+
+#### ⚠️ Börvärdet kan inte uttrycka "håll" — rättat 2026-11-21
+
+Föregående stycke är riktigt men ofullständigt, och ofullständigheten låg i drift i
+veckor. `backup_soc` är ett börvärde i **två** riktningar, och när bit 5 är på — vilket
+den är i normalläget — finns **inget** värde som betyder "stå still":
+
+| golv vs SOC | resultat |
+|---|---|
+| över | nätladdning upp till golvet, via reservvägen, **inte effektreglerad** |
+| under | Self-Use laddar ur ned mot golvet |
+| lika | **omöjligt att träffa** — SOC-sensorn är heltal och det visade värdet är en övre gräns för det verkliga |
+
+Att sätta `golv = SOC` för att "låsa" batteriet är därför i praktiken en
+**nätladdningsorder varje kvart**. Mätt 2026-11-21: 44 laddstötar mot 0–7 per dag
+veckan innan, 93 % av kvartarna, 0,19–0,30 kWh styck, upp till 12,8 kW eftersom
+reservvägen går på `43012` = 50,0 A. Batteriet hissades 12 → 50 % utan att planen
+någon gång begärde nätladdning.
+
+**Regler för modellen:**
+
+1. **"Håll" uttrycks i bit 5**, aldrig i börvärdet. Bit 5 på endast när planen
+   faktiskt vill nätladda.
+2. Ett börvärde **över** SOC får bara sättas när inköpet är avsiktligt. Höjning med
+   ΔSOC kostar `ΔSOC/100 × kapacitet` kWh nätenergi till aktuellt spotpris, och den
+   energin är förbrukad oavsett om den någonsin kapar en topp.
+3. Ska reservvägen användas som laddkanal måste `43012` sättas först — annars går
+   den på 50 A. Den är ett **tak**, inte ett börvärde, och appen skriver den aldrig.
+4. Med bit 5 av är ett högt börvärde **ofarligt**: det kan bara strypa urladdning.
+
+Fullständigt mätbevis och sekvenskrav: `SPEC-effektregulator.md` §2.4a.
+
+**Kostnadsvarning:** eftersom bit 5 är på i normalläget är varje höjning av `backup_soc`
+över aktuell SOC en **nätladdningsorder**. Höjning med ΔSOC kostar
+`ΔSOC/100 × batterikapacitet` kWh nätenergi innan någon tariffnytta uppstår. Modellen får
+inte sätta ett golv över SOC utan att den kostnaden finns i målfunktionen.
+
 
 ---
 
