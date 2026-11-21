@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.2 — 2026-11-21
+
+### Rättat: onödig golvsvängning varje kvart
+
+0.7.1 skrev det säkra golvet (15) **varje** kvart i vänteläge, även när bit 5
+redan var bekräftat av. Det gav två extra skrivningar per kvart och — värre —
+under ~5 s stod urladdningsgolvet på 15, dvs batteriet kunde laddas ur fritt.
+Upptäcktes av bevakningen 12:15:01: `golv 52 -> 15 -> 51`.
+
+Nedskrivningen till 15 sker nu **endast när bit 5 kan vara öppen**: bekräftat på,
+eller okänt läge (entiteten `unavailable` efter reload). Är bit 5 bekräftat av är
+ett högt golv ofarligt — det kan bara strypa urladdning — och körningen rör inget.
+
 ## 0.7.1 — 2026-11-21
 
 ### Rättat: självförstärkande nätladdning i vänteläge (rotorsak)

@@ -1,5 +1,5 @@
 name: BatteryControl
-version: "0.7.1"
+version: "0.7.2"
 slug: batterycontrol
 description: Kvartsvis batterioptimering (HiGHS LP) mot effekttariff och spotpris
 url: https://github.com/srogerk/batterycontrol

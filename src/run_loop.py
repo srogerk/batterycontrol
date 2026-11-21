@@ -216,21 +216,26 @@ def main():
         # Vill vi ladda: oppna bit 5 forst (annars nekar invertern TOU-laddningen),
         # och golvet ar 15 hela tiden - lagt och ofarligt anda.
         bit5_state = client.get_state("switch.allow_grid_to_charge_the_battery")
-        bit5_on = bool(bit5_state and bit5_state.get("state") == "on")
+        bit5_raw = bit5_state.get("state") if bit5_state else None
+        bit5_known = bit5_raw in ("on", "off")
+        bit5_on = (bit5_raw == "on")
+        # Ar laget okant (entiteten unavailable efter reload, misslyckad poll)
+        # maste vi anta att kranen ar OPPEN. Det ar den sakra riktningen: da
+        # skrivs det ofarliga golvet forst i stallet for att chansa.
+        assume_on = bit5_on or not bit5_known
 
         if want_lock:
-            # Steg 1: farligt golv bort forst. Skrivs alltid nar kranen ar oppen -
-            # vi kan inte lita pa current_backup_soc (den defaultar till 15 vid
-            # lasfel, vilket skulle dolja ett hogt golv). Ett golv pa SAFE_FLOOR
-            # ar ofarligt aven med bit 5 pa, sa skrivningen ar idempotent och
-            # kostar inget utom ~5 s latens.
+            # Steg 1: neutralisera golvet - men ENDAST nar kranen kan vara oppen.
+            # Ar bit 5 bekraftat av ar golvet ofarligt hur hogt det an ar, och da
+            # vore en nedskrivning till 15 en onodig svangning som dessutom
+            # slangde urladdningsgolvet till 15 i ~5 s varje kvart.
             wrote_safe = False
-            if bit5_on or int(current_backup_soc) > SAFE_FLOOR:
-                log(f"[LIVE MODBUS] Sänker backup_soc till säkert golv {SAFE_FLOOR}% innan bit 5 stängs (var {current_backup_soc}%)")
+            if assume_on:
+                log(f"[LIVE MODBUS] Sänker backup_soc till säkert golv {SAFE_FLOOR}% innan bit 5 stängs (var {current_backup_soc}%, bit5={'okänt' if not bit5_known else 'på'})")
                 client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_backup_soc", "value": SAFE_FLOOR})
                 wrote_safe = True
             # Steg 2: stang kranen.
-            if bit5_on:
+            if assume_on:
                 log("[LIVE MODBUS] Stänger bit 5 (allow_grid_to_charge_the_battery): ingen nätladdning planerad")
                 client.call_service("switch", "turn_off", {"entity_id": "switch.allow_grid_to_charge_the_battery"})
             # Steg 3: nu ar ett hogt golv ofarligt - det kan bara strypa urladdning.
