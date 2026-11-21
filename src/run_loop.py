@@ -132,13 +132,59 @@ def main():
     else:
         target_charge_amps = 0.0
 
-    # Bestäm target_backup_soc:
-    # Under effekttariff tillåts Solis parera laster fritt över 15% basgolv.
-    if is_tariff_window or next_discharge_kw > 0.05:
-        target_backup_soc = 15
-    else:
-        # Nattetid utanför tariff vid laddning/vänteläge: lås vid nuvarande SOC
-        target_backup_soc = int(min(100, max(15, round(current_soc))))
+    # --- backup_soc och bit 5: ETT register med TVA funktioner -----------------
+    #
+    # Register 43024 (backup_soc) ar inte en sparr utan ett BORVARDE som verkar
+    # i bada riktningarna (SPEC-effektregulator.md 2.4, kausalt matt 2026-11-19):
+    #
+    #   golv UNDER aktuell SOC -> Self-Use laddar ur ned mot golvet
+    #   golv OVER  aktuell SOC -> natladdning upp till golvet, fran natet, om
+    #                             bit 5 (allow_grid_to_charge_the_battery) ar pa
+    #
+    # SOC-sensorn (input-register 33139) har 1 %-upplosning: 1326 matpunkter
+    # 14-21 nov 2026 inneholl inte ett enda decimalvarde. round(), floor() och
+    # int() ger darfor IDENTISKT resultat - att byta till floor() vore en no-op.
+    #
+    # Darav buggen som lag i drift till 2026-11-21. Koden skrev, i vantelage,
+    # golv = round(SOC) for att "lasa" batteriet. Eftersom visat SOC ar en ovre
+    # grans for det verkliga vardet hamnade golvet pa eller over det verkliga,
+    # och varje kvart blev darfor en natladdningsorder: reservvagen drog full
+    # effekt (43012 = 50,0 A) tills SOC tickat ett helt steg.
+    #
+    # Matt 2026-11-21: 37 burstar, 93 % av kvartarna 03:00-10:00, 0,19-0,30 kWh
+    # styck = 0,75-1,19 % av batteriet, alla 5-16 s efter appens skrivning.
+    # Batteriet laddades 12 -> 48 % utan att planen nagon gang begarde
+    # natladdning, och 44 burstar mot 0-7 per dag veckan innan.
+    #
+    # SLUTSATSEN: med bit 5 pa finns INGET varde pa 43024 som betyder "hall".
+    #   golv > SOC -> laddar, golv < SOC -> laddar ur, golv = SOC -> omojligt att
+    #   traffa med 1 % upplosning (och hamnar i praktiken over).
+    # En hall-funktion maste darfor uttryckas i BIT 5, inte i golvet.
+    #
+    # Vi delar upp rollerna:
+    #   bit 5  = far batteriet laddas fran natet overhuvudtaget?
+    #   43024  = urladdningsgolv (och laddmal ENDAST nar bit 5 ar pa)
+    #
+    # Nattoppladdning sker via TOU slot 1, som har egen cut-off (43708) och egen
+    # stromsalva - den vagen ar effektreglerad. Reservvagen ar det INTE (den gar
+    # pa 43012 = 50 A). Darfor ska golvet hallas lagt sa lange vi laddar: annars
+    # tander reservvagen och tar over med okontrollerad effekt.
+    want_grid_charge = next_grid_charge_kw > 0.05
+    want_lock = not (want_grid_charge or is_tariff_window or next_discharge_kw > 0.05)
+
+    # Golvvardet som ALLTID ar ofarligt: under alla tankbara SOC-varden (utom
+    # under 15 %, dar overdischarge_soc = 14 ar det harda skyddet).
+    # Ett golv pa SAFE_FLOOR kan aldrig bli en natladdningsorder.
+    SAFE_FLOOR = 15
+
+    target_backup_soc = int(min(100, max(SAFE_FLOOR, int(current_soc)))) if want_lock else SAFE_FLOOR
+
+    # Bit 5: pa ENDAST nar planen faktiskt vill ladda fran natet. I alla andra
+    # lagen ar den av, sa att en hogning av golvet aldrig kan bli en order.
+    # Skrivs bara vid andring - 43110 har ~40 s skrivlatens och ska inte roras
+    # i onodan. Switch-entiteten skoter bitthanteringen i integrationen, sa vi
+    # ror aldrig 43110 rakt (bit 1/TOU far inte skrivas over).
+    want_grid_charge_permission = want_grid_charge
 
     log(f"Optimerat börvärde för kommande kvart (v2): Ladda={next_charge_kw:.2f} kW (Nät={next_grid_charge_kw:.2f} kW -> {target_charge_amps} A vid {battery_voltage:.1f} V), Urladda={next_discharge_kw:.2f} kW, Target Backup SOC={target_backup_soc}%, Nuvarande SOC={current_soc:.1f}%")
 
@@ -152,10 +198,58 @@ def main():
     else:
         status_text = "Aktiv styrning (Live Modbus v2)"
         log(f"Styrning: {status_text}.")
-        # Skriv backup_soc om den ändrats
-        if int(current_backup_soc) != target_backup_soc:
-            log(f"[LIVE MODBUS] Ändrar number.solis_s6_eh1p_backup_soc: {current_backup_soc}% -> {target_backup_soc}%")
-            client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_backup_soc", "value": target_backup_soc})
+
+        # SEKVENSUPPBYGGNAD - latenserna ar OMVANDA, sa "ratt ordning" racker inte.
+        #
+        # Uppmatt skrivlatens: 43110 (bit 5 via switch) upp till ~40 s,
+        # 43024 (backup_soc) ~5 s. Skulle vi stanga bit 5 forst och golvet sedan
+        # landar golvet ~35 s FORRE bit 5, och under den tiden star ett hogt golv
+        # medan natladdning fortfarande ar tillaten - precis det fonster som gav
+        # 8-10 kW i de gamla fallen (SPEC 2.4).
+        #
+        # Losningen ar inte att ordna tva asynkrona skrivningar, utan att aldrig
+        # skriva ett farligt varde: nar vi gar in i "las" skriver vi forst golvet
+        # till SAFE_FLOOR (15), som ar ofarligt aven med bit 5 pa. Forst darefter
+        # satts det riktiga golvet, och bit 5 stangs. Da finns inget fonster dar
+        # hogt golv och tillaten natladdning sammanfaller - oavsett latens.
+        #
+        # Vill vi ladda: oppna bit 5 forst (annars nekar invertern TOU-laddningen),
+        # och golvet ar 15 hela tiden - lagt och ofarligt anda.
+        bit5_state = client.get_state("switch.allow_grid_to_charge_the_battery")
+        bit5_on = bool(bit5_state and bit5_state.get("state") == "on")
+
+        if want_lock:
+            # Steg 1: farligt golv bort forst. Skrivs alltid nar kranen ar oppen -
+            # vi kan inte lita pa current_backup_soc (den defaultar till 15 vid
+            # lasfel, vilket skulle dolja ett hogt golv). Ett golv pa SAFE_FLOOR
+            # ar ofarligt aven med bit 5 pa, sa skrivningen ar idempotent och
+            # kostar inget utom ~5 s latens.
+            wrote_safe = False
+            if bit5_on or int(current_backup_soc) > SAFE_FLOOR:
+                log(f"[LIVE MODBUS] Sänker backup_soc till säkert golv {SAFE_FLOOR}% innan bit 5 stängs (var {current_backup_soc}%)")
+                client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_backup_soc", "value": SAFE_FLOOR})
+                wrote_safe = True
+            # Steg 2: stang kranen.
+            if bit5_on:
+                log("[LIVE MODBUS] Stänger bit 5 (allow_grid_to_charge_the_battery): ingen nätladdning planerad")
+                client.call_service("switch", "turn_off", {"entity_id": "switch.allow_grid_to_charge_the_battery"})
+            # Steg 3: nu ar ett hogt golv ofarligt - det kan bara strypa urladdning.
+            # Skrev steg 1, star registret pa SAFE_FLOOR oavsett current_backup_soc,
+            # sa malvardet maste skrivas aven om det rakar lika det gamla vardet.
+            if wrote_safe or int(current_backup_soc) != target_backup_soc:
+                log(f"[LIVE MODBUS] Ändrar number.solis_s6_eh1p_backup_soc: {current_backup_soc}% -> {target_backup_soc}%")
+                client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_backup_soc", "value": target_backup_soc})
+        else:
+            # Ladd- eller urladdningslage: golvet ar redan SAFE_FLOOR.
+            if want_grid_charge_permission and not bit5_on:
+                log("[LIVE MODBUS] Öppnar bit 5 (allow_grid_to_charge_the_battery): planen vill nätladda")
+                client.call_service("switch", "turn_on", {"entity_id": "switch.allow_grid_to_charge_the_battery"})
+            if int(current_backup_soc) != target_backup_soc:
+                log(f"[LIVE MODBUS] Ändrar number.solis_s6_eh1p_backup_soc: {current_backup_soc}% -> {target_backup_soc}%")
+                client.call_service("number", "set_value", {"entity_id": "number.solis_s6_eh1p_backup_soc", "value": target_backup_soc})
+            if not want_grid_charge_permission and bit5_on:
+                log("[LIVE MODBUS] Stänger bit 5 (allow_grid_to_charge_the_battery): urladdningsläge, ingen nätladdning")
+                client.call_service("switch", "turn_off", {"entity_id": "switch.allow_grid_to_charge_the_battery"})
 
         # TOU Slot 1 Nätladdning:
         plan_48h = plan_attrs.get("plan_48h", [])
@@ -231,7 +325,11 @@ def main():
             "next_discharge_kw": next_discharge_kw,
             "target_soc_percent": target_soc,
             "target_backup_soc": target_backup_soc,
-            "current_soc": current_soc
+            "current_soc": current_soc,
+            # Synliggor bit 5-laget. Buggen 2026-11-21 kunde halla i sig i dygn
+            # just for att ingenting i HA visade att natladdning var TILLATEN
+            # medan planen sade vila. Nu ar laget lasbart i plan-sensorns attribut.
+            "grid_charge_allowed": want_grid_charge_permission,
         }
     )
 
