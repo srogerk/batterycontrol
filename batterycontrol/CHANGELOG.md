@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.8.0 — 2026-11-25
+
+### Nytt: styrningen flyttad till en egen modul, läge per kvart
+
+All styrning sker nu via `src/battery_control.py` — en ren modul som bygger en
+lista åtgärder och skriver **enbart HA-entiteter**, aldrig Modbus-register.
+Fem lägen: `charge`, `discharge_battery`, `discharge_grid`, `idle`, `idle_grid`.
+Laddning går före allt annat; tariffönstret avgör **hur** urladdningen sker,
+aldrig **om** laddning ska ske.
+
+Diffning: en åtgärd skrivs bara när värdet faktiskt avviker från det lästa.
+Mätt i laddläge: 17 åtgärder → 1 skrivning när inget behöver ändras.
+
+Verifiering: efter att laddfönstret öppnats läses slot 5:s register tillbaka
+(`43736..43742` + periodmask `43707`) och jämförs med det som skrevs.
+
+### Rättat: importtaket 43488 var verkningslöst utan bit 7
+
+`peak_max_usable_grid_power` (43488) håller bara importen under taket om
+`switch.grid_peak_shaving_power_enable` (43483 bit 7) är **på**. Utan den gick
+importen till 8 041 W mot ett tak på 6 000 W — 69,8 % av minuterna över tak.
+Med bit 7 på: 0,7 % över, och nattimporten låst på 1 628–1 636 W timme efter
+timme. Bit 11 (`peak_shaving_mode`) räcker alltså inte.
+
+Koden satte bit 11 och 43488 men rörde aldrig bit 7, vilket gjorde läge
+`discharge_grid` och `idle_grid` verkningslösa. Värre: med bit 7 på ströps
+**laddningen** — 24 nov 21:57–23:00 bad planen 4,0 kW, huslasten var 2 571 W,
+taket 5 000 W, och faktisk laddning blev 1 970 W.
+
+Bit 7 sätts nu **av** i `charge`, `discharge_battery` och `idle`, och **på** i
+`discharge_grid` och `idle_grid`.
+
+### Rättat: laddfönstrets sluttid låg 1 minut för tidigt
+
+Slot-registren har minutupplösning utan sekund. Slutet sätts nu till kvartens
+slut + 1 minut (`END_MARGIN_MINUTES = 1`), med klämning till 23:59 vid midnatt.
+
+### Rättat: urladdningsgränsen 0 gav FRI urladdning
+
+Spec 7d/7e angav `battery_discharge_limit_power = 0` för "batteriet inaktivt".
+Skåpmatning 2026-11-25 visar att 0 är **ogiltigt** i enheten och ger motsatsen
+— batteriet laddade ur fullt.
+
+| entitet | register | faktisk urladdning | utfall |
+|---|---|---|---|
+| 10 000 W | 1 000 | 3 069 W | fri (referens) |
+| 1 000 W | 100 | 1 045 W | taket biter |
+| 500 W | 50 | 550 W | taket biter |
+| 200 W | 20 | 226 W | taket biter — lägsta fungerande |
+| 100 W | 10 | 3 004 W | biter INTE |
+| 50 W | 5 | — | avvisas tyst |
+| 0 W | 0 | 3 064 W | fri |
+
+Två fallgropar: **entiteten räknar watt, registret tiotal watt** (faktor 10), så
+entiteten 50 W blir register 5 och ligger under enhetens minimi — då avvisar
+enheten tyst och behåller sitt gamla värde (syns i HA:s loggbok som en ändring
+med `user=None`). Och 100 W ligger precis på specens angivna minimigräns men
+biter ändå inte. Entitetens `min=0, max=655350` är registergränser, inte
+enhetens verkliga.
+
+Läge `idle` och `idle_grid` skriver nu `DISCHARGE_LIMIT_IDLE_W = 200`.
+
+### Rättat: verifieringen läste tillbaka för snabbt
+
+En läsning 12 s efter skrivning visar cachens eftersläpning och ger falska
+avvisanden. Acceptans verifieras nu med faktisk effekt över minst 90 s, eller
+via loggbokens `context_user_id` (`None` = enhetens eget värde).
+
 ## 0.7.2 — 2026-11-21
 
 ### Rättat: onödig golvsvängning varje kvart
