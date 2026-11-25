@@ -734,6 +734,10 @@ def main():
             "next_grid_charge_kw": q0["grid_charge_kw"],
             "next_pv_charge_kw": 0.0,
             "next_discharge_kw": q0["discharge_kw"],
+            # Planens natimport for kvarten. Styrlage (c)/(e) satter inverterns
+            # peak_shaving-tak till detta varde - det ar samma storhet som
+            # balansformeln Phus - Ppv = Pnat + Pbatt loser ut.
+            "next_grid_import_kw": q0.get("grid_import_kw", 0.0),
             "target_soc_percent": q0["soc_pct"],
             "solve_time_seconds": round(elapsed, 3),
             "optimal_p_dag": optimal_p_dag,
