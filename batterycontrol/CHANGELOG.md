@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.8.1 — 2026-11-25
+
+### Rättat: ~10 kW nätladdning i läge e (larm 2026-11-25)
+
+Läge `idle_grid` lämnade laddporten `battery_charge_limit_power` (43130) på
+**10 000 W** — värdet från senaste laddläge. Koden rörde entiteten bara i
+laddläget, så den låg kvar hela dagen. Med 10 kW-porten öppen, importtaket på
+14 kW och `peak_baseline_soc` = 100 % (mot en SOC på 67–69 %) natladdade
+invertern **9,7 kW** tre gånger: 09:30, 10:15 och 13:30, vardera ~15–30 min.
+Nättopparna nådde 12,9 kW och satte dagens P1 (6,05 kW timmedel) och P3
+(3,58 kW) — båda skapade av felet.
+
+Korrelationen är exakt: varje episod började samma sekund som 43488 skrevs till
+14 000 W och slutade samma sekund som den nollades (09:45, 10:45, 14:00).
+
+**Åtgärd:** `battery_charge_limit_power` sätts nu till **200 W** i alla
+icke-laddande lägen (b, c, d, e), inte bara i laddläget. Roger har mätt att
+0 och 100 W betyder "obegränsat" för båda effektgränserna; 200 W är lägsta
+värde som faktiskt stänger av.
+
+### Rättat: importtaket måste täcka huslasten i laddläge
+
+Roger 2026-11-25: *"Peak Max Usable Grid Power kan påverka laddning av
+batteriet. Den måste täcka huslasten under batteriladdningen annars försätts
+batteriet i urladdning för att hjälpa till med huslasten, och det blir ingen
+laddning."*
+
+Laddläget skrev tidigare inte `peak_max_grid` alls. Kom värdet från ett
+föregående läge c/e kunde det stå på 0 eller planens nattak — då täcker det
+inte huslasten och laddningen uteblir. Det var mekanismen bakom den uteblivna
+nattladdningen 2026-11-23. Laddläget skriver nu `PEAK_GRID_MAX_W` (15 000 W)
+explicit, med bit 7 fortsatt AV.
+
+### Två invarianter upphävda
+
+Testerna kodifierade den gamla specen och uppdaterades:
+
+| gammal invariant | ny invariant |
+|---|---|
+| "endast laddläge rör `charge_limit_power`" | laddporten stängs i **alla** icke-laddande lägen |
+| "`peak_max_grid` skrivs inte i laddläge" | laddläget skriver ett tak som **täcker huslasten** |
+
+Nytt regressionsskydd: `BothLimitsClosedTest` samt
+`test_charge_mode_writes_import_cap_that_covers_house_load`.
+130 tester gröna, 21/21 entiteter validerade.
+
 ## 0.8.0 — 2026-11-25
 
 ### Nytt: styrningen flyttad till en egen modul, läge per kvart

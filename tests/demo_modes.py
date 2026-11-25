@@ -77,7 +77,8 @@ def main():
     print()
     print("=" * 78)
     print("  Alla lagen: bit 8 (Forcecharge Peakshaving) AV, reservgolv 15 %.")
-    print("  Endast laddlage ror charge_limit_power och TOU-fonstret.")
+    print("  Bada effektgranserna: laddlage oppnar charge_limit (10000 W),")
+    print("  alla andra lagen stanger bada till 200 W. Endast laddlage ror TOU-fonstret.")
     print("=" * 78)
     print()
 

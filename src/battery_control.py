@@ -122,8 +122,7 @@ PEAK_GRID_MAX_W = 15000
 # 0 blockerar alltsa INTE urladdning, till skillnad fran charge_limit_power).
 DISCHARGE_LIMIT_ACTIVE_W = 10000
 
-# Spec 7d/7e vill ha batteriet INAKTIVT och anger darfor 0. Det fungerar inte:
-# 0 ar ogiltigt i enheten och ger i stallet FRI urladdning.
+# Spec 7d/7e: batteriet INAKTIVT. Bada effektgranserna satts till 200 W.
 #
 # Skarpmatt 2026-11-25 01:19-01:41 pa huslast ~2 950 W, importtaket av, SOC 29-32 %:
 #
@@ -148,6 +147,14 @@ DISCHARGE_LIMIT_ACTIVE_W = 10000
 #
 # 200 W ger 226 W urladdning mot 3 000 W vid 0: en faktor 13. Vald med marginal
 # nedat mot det som bevisligen fungerar.
+#
+# VARFOR BADA GRANSERNA (Roger 2026-11-25): entiteten for LADDNING (43130) har
+# inte samma beteende som den for URLADDNING (43131). Roger har testat bada:
+# 0 och 100 W betyder "obegransat" for dem bada, 200 W ar lagsta varde som
+# faktiskt stanger av. Att bara satta urladdningsgransen - som koden gjorde
+# fore 2026-11-25 - lamnade laddporten vid 10 000 W fran senaste laddlage, och
+# invertern natladdade 9,7 kW i lag e (tre ganger den 25 nov, ~10 kW toppar).
+CHARGE_LIMIT_IDLE_W = 200
 DISCHARGE_LIMIT_IDLE_W = 200
 
 # BMS:ets egen stromgrans (33143/33206 = 50,0 A). Over den nekar enheten.
@@ -399,6 +406,23 @@ def build_actions(
                 "spec 7a: tillat laddning fran natet = ON (bit 5)",
             )
         )
+        # Roger 2026-11-25: "Peak Max Usable Grid Power kan paverka laddning av
+        # batteriet. Den maste tacka huslasten under batteriladdningen annars
+        # forsätts batteriet i urladdning for att hjalpa till med huslasten,
+        # och det blir ingen laddning."
+        #
+        # Skrivs darfor ALLTID i laddlage, inte bara lamnat kvar. Kommer vardet
+        # fran ett foregaende lag c/e kan det sta pa 0 eller planens nattak -
+        # da tacker det inte huslasten och laddningen uteblir. Det var exakt
+        # den buggen som gav 0 W-laddning natten 2026-11-23.
+        actions.append(
+            _set_number(
+                "peak_max_grid",
+                PEAK_GRID_MAX_W,
+                "spec 7a: importtaket maste tacka huslasten under laddningen "
+                "- annars satts batteriet i urladdning och laddningen uteblir",
+            )
+        )
 
         # 2. Laddfonstret pa slot 5.
         actions.append(
@@ -450,6 +474,21 @@ def build_actions(
                 "allow_grid_charge",
                 False,
                 "ingen natladdning planerad i detta lage (bit 5 av)",
+            )
+        )
+        # Laddporten maste stangas i ALLA icke-laddande lagen. Fore 2026-11-25
+        # rordes den bara i lage a, sa den lag kvar pa 10 000 W fran senaste
+        # laddlage hela dagen. Det var den oppna porten som lat invertern
+        # natladda 9,7 kW i lage e (Rogers larm 2026-11-25).
+        #
+        # 200 W ar lagsta varde som bevisligen stanger av bada riktningarna;
+        # 0 och 100 W betyder "obegransat" (Rogers matning 2026-11-25).
+        actions.append(
+            _set_number(
+                "charge_limit_power",
+                CHARGE_LIMIT_IDLE_W,
+                f"ingen laddning i detta lage - {CHARGE_LIMIT_IDLE_W} W ar "
+                "lagsta grans som stanger av (0 och 100 W = obegransat)",
             )
         )
 
@@ -564,7 +603,7 @@ def build_actions(
                 "discharge_limit_power",
                 DISCHARGE_LIMIT_IDLE_W,
                 f"spec 7d: batteriet inaktivt - {DISCHARGE_LIMIT_IDLE_W} W ar "
-                "lagsta grans som bevisligen biter (0 ger fri urladdning)",
+                "lagsta grans som bevisligen biter (0 och 100 W ger fri urladdning)",
             )
         )
         return actions
@@ -589,7 +628,7 @@ def build_actions(
             "discharge_limit_power",
             DISCHARGE_LIMIT_IDLE_W,
             f"spec 7e: batteriet inaktivt - {DISCHARGE_LIMIT_IDLE_W} W ar "
-            "lagsta grans som bevisligen biter (0 ger fri urladdning)",
+            "lagsta grans som bevisligen biter (0 och 100 W ger fri urladdning)",
         )
     )
     actions.append(

@@ -411,20 +411,22 @@ def build_html(data):
     </div>
   </div>
 
-  <!-- Graf 1: Konsumenter (Stacked Area) -->
+  <!-- Graf 1: VÄNSTERLEDET — Phush - Ppv -->
   <div class="chart-section">
     <div class="chart-header">
-      <div class="chart-title">Konsumenter (kW)</div>
+      <div class="chart-title">Vänsterledet (kW) — P<sub>hush</sub> − P<sub>pv</sub></div>
+      <div style="font-size: 0.8rem; color: var(--text-muted);">Hushållsbehovet uppåt. Solproduktionen dras av uppifrån — den streckade linjen är P<sub>hush</sub>, ytan därunder är det som återstår att täcka.</div>
     </div>
     <div class="chart-wrapper">
       <canvas id="consumersChart"></canvas>
     </div>
   </div>
 
-  <!-- Graf 2: Producenter & Källor (Stacked Area) -->
+  <!-- Graf 2: HÖGERLEDET — Pnät + Pbatt -->
   <div class="chart-section">
     <div class="chart-header">
-      <div class="chart-title">Producenter & Källor (kW)</div>
+      <div class="chart-title">Högerledet (kW) — P<sub>nät</sub> + P<sub>batt</sub></div>
+      <div style="font-size: 0.8rem; color: var(--text-muted);">Hur behovet täcks. Batteriladdning går nedåt — den drar från samma summa.</div>
     </div>
     <div class="chart-wrapper">
       <canvas id="producersChart"></canvas>
@@ -529,6 +531,29 @@ def build_html(data):
     const gridExport = quarters.map(q => q.grid_export_kw);
     const socPct = quarters.map(q => q.soc_pct);
     const priceIn = quarters.map(q => q.price_in);
+    // Vänsterledet i balansekvationen Phush - Ppv = Pnät + Pbatt.
+    // netDemand är det som återstår att täcka; högerledet staplar exakt detta.
+    const netDemand = quarters.map(q => q.load_kw - q.pv_kw);
+    // Netto batteri: laddning drar (negativt), urladdning ger (positivt).
+    const battNet = quarters.map(q => q.discharge_kw - q.charge_kw);
+
+    // GEMENSAM Y-SKALA för graf 1 och 2.
+    //
+    // Poängen med att rita vänster- och högerledet sida vid sida är att man
+    // ska kunna SE att de är lika stora. Med Chart.js automatiska skalning får
+    // varje graf sin egen skala — då är en stapel på 3 kW olika hög i de två
+    // graferna och jämförelsen blir meningslös (upptäckt 2026-11-25: graf 1
+    // hade nollpunkten på 226 px, graf 2 på 254 px).
+    //
+    // Skalan beräknas därför ur ALLA serier i BÅDA graferna och tvingas på
+    // båda. Symmetrisk kring noll så att upp/ned-riktningen är visuellt likvärdig.
+    const _allVals = [].concat(
+      houseLoad, pvKw, netDemand, gridImport,
+      battNet.map(v => Math.abs(v))
+    ).filter(v => typeof v === 'number' && isFinite(v));
+    const _peak = Math.max(1, ..._allVals.map(v => Math.abs(v)));
+    const sharedYMax = Math.ceil(_peak * 1.15 * 2) / 2;   // avrunda uppåt till 0,5 kW
+    const sharedYMin = -sharedYMax;
 
     // Tidsaxel-formatering:
     // 1. Ange bara jämna timmar med klockslag (t.ex. 13).
@@ -592,15 +617,26 @@ def build_html(data):
       }}
     }};
 
-    // Chart 1: Konsumenter (Stacked Area)
+    // Chart 1: VÄNSTERLEDET — Phush - Ppv
+    //
+    // Ritregel: P_hush ritas UPPÅT från noll (röd yta). P_pv ritas NEDÅT från
+    // noll (gul yta) — positiv till sin natur, men ritad nedåt eftersom den
+    // dras av från P_hush. Skillnaden mellan ytorna är nettot, som markeras
+    // med den orange linjen.
+    //
+    // Varför ytor och inte ett band: ett band mellan P_hush och (P_hush-Ppv)
+    // gör soleffekten till en *tjocklek* i stället för en *höjd*. Då går
+    // magnituderna inte att jämföra ögonblick till ögonblick, och grafen kan
+    // inte längre ställas sida vid sida med högerledet — som använder exakt
+    // samma upp/ned-grammatik.
     new Chart(document.getElementById('consumersChart'), {{
       type: 'line',
       data: {{
         labels: quarters.map(q => q.time_str),
         datasets: [
-          // Nederst: Hushållskonsumtion
+          // Uppåt: hushållsbehovet
           {{
-            label: 'Hushållskonsumtion',
+            label: 'P_hush (behov, uppåt)',
             data: houseLoad,
             borderColor: '#f87171',
             backgroundColor: 'rgba(248, 113, 113, 0.35)',
@@ -609,14 +645,25 @@ def build_html(data):
             stepped: 'before',
             ...noPointConfig
           }},
-          // Ovanpå: Batteriladdning
+          // Nedåt: solproduktionen, "dras från Phush"
           {{
-            label: 'Batteriladdning',
-            data: chargeKw,
-            borderColor: '#c084fc',
-            backgroundColor: 'rgba(192, 132, 252, 0.45)',
+            label: 'P_pv (dras av, nedåt)',
+            data: pvKw.map(v => -v),
+            borderColor: '#facc15',
+            backgroundColor: 'rgba(250, 204, 21, 0.60)',
             borderWidth: 1.5,
-            fill: '-1',
+            fill: 'origin',
+            stepped: 'before',
+            ...noPointConfig
+          }},
+          // Nettot: P_hush − P_pv — det som återstår att täcka
+          {{
+            label: 'P_hush − P_pv (kvar att täcka)',
+            data: netDemand,
+            borderColor: '#fb923c',
+            backgroundColor: 'rgba(251, 146, 60, 0.0)',
+            borderWidth: 2,
+            fill: false,
             stepped: 'before',
             ...noPointConfig
           }}
@@ -629,11 +676,12 @@ def build_html(data):
         scales: {{
           x: sharedXAxis,
           y: {{
-            stacked: true,
+            stacked: false,
             grid: {{ color: 'rgba(255,255,255,0.05)' }},
             ticks: {{ color: '#94a3b8' }},
-            title: {{ display: true, text: 'kW', color: '#94a3b8' }},
-            min: 0
+            min: sharedYMin,
+            max: sharedYMax,
+            title: {{ display: true, text: 'kW (upp = behov, ned = sol)', color: '#94a3b8' }}
           }}
         }},
         plugins: {{
@@ -643,6 +691,13 @@ def build_html(data):
               title: function(items) {{
                 const q = quarters[items[0].dataIndex];
                 return q ? q.time_str + " (" + q.day_str + ")" : "";
+              }},
+              label: function(item) {{
+                const i = item.dataIndex;
+                const q = quarters[i];
+                if (item.datasetIndex === 0) return 'P_hush: ' + q.load_kw.toFixed(2) + ' kW';
+                if (item.datasetIndex === 1) return 'P_pv: ' + q.pv_kw.toFixed(2) + ' kW (dras av)';
+                return 'Kvar att täcka: ' + netDemand[i].toFixed(2) + ' kW';
               }}
             }}
           }}
@@ -650,15 +705,23 @@ def build_html(data):
       }}
     }});
 
-    // Chart 2: Producenter & Källor (Stacked Area)
+    // Chart 2: HÖGERLEDET — Pnät + Pbatt
+    //
+    // Samma ritregel som graf 1, speglad: P_nät ritas uppåt från noll,
+    // P_batt ritas med tecken — laddning NEDÅT (den drar från samma summa,
+    // precis som P_pv i graf 1), urladdning UPPÅT. Staplarnas sammanlagda
+    // höjd ska bli identisk med graf 1:s "kvar att täcka".
+    //
+    // Tooltipen räknar balansekvationen live och visar om den håller, så
+    // grafen granskar sig själv i stället för att bara påstå balans.
     new Chart(document.getElementById('producersChart'), {{
       type: 'line',
       data: {{
         labels: quarters.map(q => q.time_str),
         datasets: [
-          // Nederst: Nätimport
+          // P_nät — import uppåt från noll
           {{
-            label: 'Nätimport',
+            label: 'P_nät (import)',
             data: gridImport,
             borderColor: '#38bdf8',
             backgroundColor: 'rgba(56, 189, 248, 0.45)',
@@ -667,25 +730,14 @@ def build_html(data):
             stepped: 'before',
             ...noPointConfig
           }},
-          // Mellan: Solproduktion
+          // P_batt — laddning nedåt, urladdning uppåt
           {{
-            label: 'Solproduktion',
-            data: pvKw,
-            borderColor: '#facc15',
-            backgroundColor: 'rgba(250, 204, 21, 0.55)',
-            borderWidth: 1.5,
-            fill: '-1',
-            stepped: 'before',
-            ...noPointConfig
-          }},
-          // Toppen: Batteriurladdning
-          {{
-            label: 'Batteriurladdning',
-            data: dischargeKw,
+            label: 'P_batt (urladdning +/laddning −)',
+            data: battNet,
             borderColor: '#34d399',
-            backgroundColor: 'rgba(52, 211, 153, 0.55)',
+            backgroundColor: 'rgba(52, 211, 153, 0.45)',
             borderWidth: 1.5,
-            fill: '-1',
+            fill: 'origin',
             stepped: 'before',
             ...noPointConfig
           }}
@@ -698,11 +750,12 @@ def build_html(data):
         scales: {{
           x: sharedXAxis,
           y: {{
-            stacked: true,
+            stacked: false,
             grid: {{ color: 'rgba(255,255,255,0.05)' }},
             ticks: {{ color: '#94a3b8' }},
-            title: {{ display: true, text: 'kW', color: '#94a3b8' }},
-            min: 0
+            min: sharedYMin,
+            max: sharedYMax,
+            title: {{ display: true, text: 'kW (upp = källa, ned = batteriladdning)', color: '#94a3b8' }}
           }}
         }},
         plugins: {{
@@ -712,6 +765,22 @@ def build_html(data):
               title: function(items) {{
                 const q = quarters[items[0].dataIndex];
                 return q ? q.time_str + " (" + q.day_str + ")" : "";
+              }},
+              afterBody: function(items) {{
+                const i = items[0].dataIndex;
+                const q = quarters[i];
+                const vanster = q.load_kw - q.pv_kw;
+                const hoger = q.grid_import_kw + (q.discharge_kw - q.charge_kw);
+                // Tolerans 0.02 kW: källdata är avrundad till två decimaler,
+                // så en differens på en hundradel är avrundning, inte obalans.
+                const diff = vanster - hoger;
+                const ok = Math.abs(diff) < 0.02;
+                return [
+                  '',
+                  'Vänster: ' + vanster.toFixed(2) + ' kW',
+                  'Höger:  ' + hoger.toFixed(2) + ' kW',
+                  ok ? '✓ balans' : '✗ avvikelse ' + diff.toFixed(2) + ' kW'
+                ];
               }}
             }}
           }}

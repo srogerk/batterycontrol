@@ -312,6 +312,16 @@ class ModeIdleTest(unittest.TestCase):
     def test_grid_charge_blocked(self):
         self.assertEqual(value_of(self.a, bc.ENTITY["allow_grid_charge"]), "off")
 
+    def test_charge_limit_is_idle_floor(self):
+        # Roger 2026-11-25: bada effektgranserna maste stangas. Laddporten
+        # lamnad pa 10 000 W var det som lat invertern natladda 9,7 kW i
+        # lage e (larmet 2026-11-25).
+        self.assertEqual(
+            value_of(self.a, bc.ENTITY["charge_limit_power"]),
+            bc.CHARGE_LIMIT_IDLE_W,
+        )
+        self.assertEqual(bc.CHARGE_LIMIT_IDLE_W, 200)
+
 
 class ModeIdleGridTest(unittest.TestCase):
     """(e) Inaktivt batteri styrt med nateffekten - spec 7e."""
@@ -343,6 +353,69 @@ class ModeIdleGridTest(unittest.TestCase):
     def test_grid_charge_blocked(self):
         self.assertEqual(value_of(self.a, bc.ENTITY["allow_grid_charge"]), "off")
 
+    def test_charge_limit_is_idle_floor(self):
+        # Laddporten maste vara stangd aven i lage e. Det var har larmet
+        # 2026-11-25 uppstod: 10 000 W kvar fran senaste laddlage.
+        self.assertEqual(
+            value_of(self.a, bc.ENTITY["charge_limit_power"]),
+            bc.CHARGE_LIMIT_IDLE_W,
+        )
+
+
+class BothLimitsClosedTest(unittest.TestCase):
+    """Regressionsskydd for larmet 2026-11-25 (~10 kW nattoppar).
+
+    Lage e lamnade laddporten (43130) pa 10 000 W fran senaste laddlage.
+    Invertern natladdade da 9,7 kW tre ganger samma dag (09:30, 10:15,
+    13:30) - varje episod exakt sa lange 43488 stod pa 14 000 W.
+
+    Tva olika krav, som maste hallas isar:
+      - LADDPORTEN ska vara stangd i ALLA icke-laddande lagen. Ingen av dem
+        ska kunna ladda fran natet.
+      - URLADDNINGSGRANSEN ar styrparameter i b och c (dar batteriet SKA
+        ladda ur), men ska vara stangd i de inaktiva lagen d och e.
+    """
+
+    IDLE_MODES = (bc.MODE_IDLE, bc.MODE_IDLE_GRID)
+
+    def test_charge_port_closed_in_all_non_charge_modes(self):
+        for mode in bc.ALL_MODES:
+            if mode == bc.MODE_CHARGE:
+                continue
+            acts = bc.build_actions(
+                mode, charge_kw=4.0, discharge_kw=2.0,
+                grid_import_kw=1.0, voltage=263.5,
+            )
+            v = value_of(acts, bc.ENTITY["charge_limit_power"])
+            self.assertEqual(
+                v, 200,
+                f"{mode} lamnade laddporten pa {v} - natladdning mojlig",
+            )
+
+    def test_discharge_limit_closed_in_idle_modes(self):
+        for mode in self.IDLE_MODES:
+            acts = bc.build_actions(
+                mode, charge_kw=0.0, discharge_kw=0.0,
+                grid_import_kw=0.0, voltage=263.5,
+            )
+            self.assertEqual(
+                value_of(acts, bc.ENTITY["discharge_limit_power"]), 200,
+                f"{mode} lamnade urladdningen oppen",
+            )
+
+    def test_charge_mode_opens_charge_limit(self):
+        acts = bc.build_actions(bc.MODE_CHARGE, charge_kw=4.0, voltage=263.5)
+        self.assertEqual(value_of(acts, bc.ENTITY["charge_limit_power"]), 10000)
+
+    def test_charge_mode_writes_import_cap_that_covers_house_load(self):
+        # Rogers punkt 2 (2026-11-25): taket maste tacka huslasten under
+        # laddning, annars satts batteriet i urladdning och laddningen uteblir.
+        acts = bc.build_actions(bc.MODE_CHARGE, charge_kw=4.0, voltage=263.5)
+        self.assertEqual(
+            value_of(acts, bc.ENTITY["peak_max_grid"]), bc.PEAK_GRID_MAX_W,
+        )
+        self.assertGreater(bc.PEAK_GRID_MAX_W, 5000)
+
 
 class InvariantTest(unittest.TestCase):
     """Gemensamma regler som maste halla i ALLA lagen."""
@@ -364,15 +437,21 @@ class InvariantTest(unittest.TestCase):
                 15, f"{mode} satte inte reservgolvet",
             )
 
-    def test_only_charge_mode_touches_charge_limit_power(self):
-        # I andra lagen lamnas vardet - att sanka det vore att gora laddning
-        # omojlig vid nasta laddkvart.
+    def test_charge_limit_power_closed_in_every_non_charge_mode(self):
+        # Fore 2026-11-25 rordes charge_limit_power bara i lage a. Den lag da
+        # kvar pa 10 000 W fran senaste laddlage hela dagen - en oppen
+        # laddport som lat invertern natladda 9,7 kW i lage e (Rogers larm
+        # 2026-11-25). Nu stangs den i ALLA icke-laddande lagen.
         for mode in bc.ALL_MODES:
             v = value_of(self._all(mode), bc.ENTITY["charge_limit_power"])
             if mode == bc.MODE_CHARGE:
                 self.assertEqual(v, 10000)
             else:
-                self.assertIsNone(v, f"{mode} rorde charge_limit_power")
+                self.assertEqual(
+                    v, bc.CHARGE_LIMIT_IDLE_W,
+                    f"{mode} lamnade laddporten oppen",
+                )
+                self.assertEqual(v, 200)
 
     def test_only_charge_mode_opens_tou_window(self):
         for mode in bc.ALL_MODES:
@@ -407,16 +486,24 @@ class InvariantTest(unittest.TestCase):
             )
 
     def test_charge_mode_never_leaves_import_cap_active(self):
-        """Ett kvarlamnat tak kapar laddningen till (tak - huslast).
+        """Importtaket ska vara AV i laddlage - men dess VARDE maste tacka huslasten.
 
-        Matt 2026-11-24 22:00-23:00: tak 5000 W, huslast 2571 W, plan 4000 W
-        -> laddningen korde 1970 W i stallet for 4000 W.
+        Tva olika saker, som latt blandas ihop:
+          - bit 7 (grid_peak_shaving) ska vara AV, annars kapas laddningen
+            till (tak - huslast). Matt 2026-11-24 22:00-23:00: tak 5000 W,
+            huslast 2571 W, plan 4000 W -> laddningen korde 1970 W.
+          - sjalva takVARDET (43488) maste anda vara hogt. Roger 2026-11-25:
+            "Peak Max Usable Grid Power maste tacka huslasten under
+            batteriladdningen annars satts batteriet i urladdning for att
+            hjalpa till med huslasten, och det blir ingen laddning."
         """
         acts = self._all(bc.MODE_CHARGE)
         self.assertEqual(value_of(acts, bc.ENTITY["grid_peak_shaving"]), "off")
-        # ...och taket ska inte ens skrivas i laddlage - det ar inte vara att
-        # rora ett varde som strax ska vara avstangt.
-        self.assertIsNone(value_of(acts, bc.ENTITY["peak_max_grid"]))
+        self.assertEqual(
+            value_of(acts, bc.ENTITY["peak_max_grid"]),
+            bc.PEAK_GRID_MAX_W,
+            "laddlaget maste skriva ett tak som tacker huslasten",
+        )
 
     def test_never_writes_raw_modbus_registers(self):
         for mode in bc.ALL_MODES:
