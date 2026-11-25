@@ -414,8 +414,8 @@ def build_html(data):
   <!-- Graf 1: VÄNSTERLEDET — Phush - Ppv -->
   <div class="chart-section">
     <div class="chart-header">
-      <div class="chart-title">Vänsterledet (kW) — P<sub>hush</sub> − P<sub>pv</sub></div>
-      <div style="font-size: 0.8rem; color: var(--text-muted);">Hushållsbehovet uppåt. Solproduktionen dras av uppifrån — den streckade linjen är P<sub>hush</sub>, ytan därunder är det som återstår att täcka.</div>
+      <div class="chart-title">Vänsterledet (kW) — Brutto-last och Netto-last</div>
+      <div style="font-size: 0.8rem; color: var(--text-muted);">Brutto-last = hela husets förbrukning. Netto-last = Brutto-last − PV-produktion, det som återstår att täcka. Gapet mellan ytorna <em>är</em> soleffekten.</div>
     </div>
     <div class="chart-wrapper">
       <canvas id="consumersChart"></canvas>
@@ -617,56 +617,60 @@ def build_html(data):
       }}
     }};
 
-    // Chart 1: VÄNSTERLEDET — Phush - Ppv
+    // Chart 1: VÄNSTERLEDET — Brutto-last och Netto-last
     //
-    // Ritregel: P_hush ritas UPPÅT från noll (röd yta). P_pv ritas NEDÅT från
-    // noll (gul yta) — positiv till sin natur, men ritad nedåt eftersom den
-    // dras av från P_hush. Skillnaden mellan ytorna är nettot, som markeras
-    // med den orange linjen.
+    // Roger 2026-11-26: "jag vill se uppskattad Huslast = Brutto-last och
+    // Netto last = Huslast - PVprod".
     //
-    // Varför ytor och inte ett band: ett band mellan P_hush och (P_hush-Ppv)
-    // gör soleffekten till en *tjocklek* i stället för en *höjd*. Då går
-    // magnituderna inte att jämföra ögonblick till ögonblick, och grafen kan
-    // inte längre ställas sida vid sida med högerledet — som använder exakt
-    // samma upp/ned-grammatik.
+    // Ritregel: BÅDA ytorna ritas UPPÅT från noll och staplas inte.
+    //   Brutto-last (röd)  = q.load_kw                 — hela husets förbrukning
+    //   Netto-last (grön)  = q.load_kw - q.pv_kw       — kvar att täcka
+    // Gapet mellan kurvorna ÄR PV-produktionen, utläst som en höjdskillnad.
+    //
+    // Varför detta är bättre än föregående version (PV ritad nedåt från noll,
+    // 2026-11-25): där blev soleffekten en *riktning* (nedåt) i stället för en
+    // *skillnad*. Här är båda serierna samma sorts storhet — förbrukning i kW —
+    // och då kan man läsa av "hur mycket tog solen av lasten" direkt som
+    // avståndet mellan linjerna. Det gör också grafen jämförbar med högerledet
+    // utan att blanda in en tredje ritgrammatik.
+    //
+    // Netto-lasten kan aldrig bli negativ i praktiken (PV > huslast ger export,
+    // och då är load_kw - pv_kw < 0). Vi klampar inte: ett negativt värde
+    // betyder export och ska synas som just det.
     new Chart(document.getElementById('consumersChart'), {{
       type: 'line',
       data: {{
         labels: quarters.map(q => q.time_str),
         datasets: [
-          // Uppåt: hushållsbehovet
+          // Nettolasten ritas FÖRST och fylls från noll (grön yta). Ytan under
+          // den är exakt det som måste täckas av nät + batteri — dvs högerledet
+          // i graf 2. Att den ligger först är inte kosmetika: Brutto-lastens
+          // band fyller mot "-1" (föregående dataset), och då får de två ytorna
+          // aldrig överlappa varandra.
           {{
-            label: 'P_hush (behov, uppåt)',
+            label: 'Netto-last (Brutto-last − PV)',
+            data: netDemand,
+            borderColor: '#4ade80',
+            backgroundColor: 'rgba(74, 222, 128, 0.28)',
+            borderWidth: 2,
+            fill: 'origin',
+            stepped: 'before',
+            ...noPointConfig
+          }},
+          // Brutto-lasten: hela husets förbrukning, ritad som linje.
+          // Fyllningen går till föregående dataset (Netto-last) — alltså blir
+          // det gula bandet MELLAN kurvorna själva PV-produktionen, läsbar som
+          // en höjdskillnad i kW. Ingen överlappande färg, ingen tredje serie.
+          {{
+            label: 'Brutto-last (husets förbrukning)',
             data: houseLoad,
             borderColor: '#f87171',
-            backgroundColor: 'rgba(248, 113, 113, 0.35)',
-            borderWidth: 1.5,
-            fill: 'origin',
-            stepped: 'before',
-            ...noPointConfig
-          }},
-          // Nedåt: solproduktionen, "dras från Phush"
-          {{
-            label: 'P_pv (dras av, nedåt)',
-            data: pvKw.map(v => -v),
-            borderColor: '#facc15',
-            backgroundColor: 'rgba(250, 204, 21, 0.60)',
-            borderWidth: 1.5,
-            fill: 'origin',
-            stepped: 'before',
-            ...noPointConfig
-          }},
-          // Nettot: P_hush − P_pv — det som återstår att täcka
-          {{
-            label: 'P_hush − P_pv (kvar att täcka)',
-            data: netDemand,
-            borderColor: '#fb923c',
-            backgroundColor: 'rgba(251, 146, 60, 0.0)',
+            backgroundColor: 'rgba(250, 204, 21, 0.50)',
             borderWidth: 2,
-            fill: false,
+            fill: '-1',
             stepped: 'before',
             ...noPointConfig
-          }}
+          }},
         ]
       }},
       options: {{
@@ -681,7 +685,7 @@ def build_html(data):
             ticks: {{ color: '#94a3b8' }},
             min: sharedYMin,
             max: sharedYMax,
-            title: {{ display: true, text: 'kW (upp = behov, ned = sol)', color: '#94a3b8' }}
+            title: {{ display: true, text: 'kW (brutto och netto last)', color: '#94a3b8' }}
           }}
         }},
         plugins: {{
@@ -695,9 +699,21 @@ def build_html(data):
               label: function(item) {{
                 const i = item.dataIndex;
                 const q = quarters[i];
-                if (item.datasetIndex === 0) return 'P_hush: ' + q.load_kw.toFixed(2) + ' kW';
-                if (item.datasetIndex === 1) return 'P_pv: ' + q.pv_kw.toFixed(2) + ' kW (dras av)';
-                return 'Kvar att täcka: ' + netDemand[i].toFixed(2) + ' kW';
+                if (item.datasetIndex === 1) return 'Brutto-last: ' + q.load_kw.toFixed(2) + ' kW';
+                return 'Netto-last: ' + netDemand[i].toFixed(2) + ' kW';
+              }},
+              afterBody: function(items) {{
+                // Visa att skillnaden mellan kurvorna ÄR soleffekten.
+                const i = items[0].dataIndex;
+                const q = quarters[i];
+                const brutto = q.load_kw;
+                const netto = netDemand[i];
+                const pv = q.pv_kw;
+                return [
+                  '',
+                  'PV tar av lasten: ' + (brutto - netto).toFixed(2) + ' kW',
+                  '(kontroll: PV = ' + pv.toFixed(2) + ' kW)'
+                ];
               }}
             }}
           }}
