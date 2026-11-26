@@ -584,6 +584,107 @@ def optimize_v2(soc_now_kwh: float,
     return plan, "optimal", res.fun, day_eft_prognos
 
 
+def build_quarter_plan_attributes(plan, *, peak_info=None, soc_now_pct=None,
+                                  t_threshold=None, extra=None):
+    """Bygger attributen för sensor.batterycontrol_quarter_plan.
+
+    Formatet är KOLUMNVIS: en array per storhet i stället för en dict per kvart.
+    Skälet är storlek. HA sparar inte attribut över 16 384 byte i databasen
+    (recorder), och postvisa kvartsposter med fulla fältnamn spränger den
+    gränsen redan vid 24 timmar. Mätt 2026-11-26 på verklig plan:
+
+        postvis, fulla namn, 96 kvartar, 6 fält  = 16 924 B   OVER
+        kolumnvis, 192 kvartar, 11 fält          = 10 774 B   OK
+
+    Kolumnvis rymmer alltså hela 48-timmarhorisonten med 34 % marginal.
+
+    Tidsstämplar: `start` ligger på toppnivå och `time[]` bär bara HH:MM.
+    Kvartarna är alltid strikt 15 minuter isär (verifierat: ett enda steg på
+    900 s över hela planen), så konsumenten räknar ut resten:
+
+        t[i] = start + i * 15 minuter
+
+    Att skriva ut full ISO per kvart kostade 920 B i onödan.
+
+    Fälten är valda så att båda diagrammen i dashboarden kan återskapas i HA:
+        graf 1 (vänsterledet):  house[] och house[]-pv[]  -> brutto och netto
+        graf 2 (högerledet):    grid_in[] och batt_charge[]/batt_discharge[]
+
+    Returnerar (state, attributes). `state` är aktuellt inköpspris i SEK/kWh —
+    samma sorts värde som spotpris-sensorn visar — och faller tillbaka på 0.0
+    om planen är tom.
+    """
+    if not plan:
+        return 0.0, {
+            "friendly_name": "Batteristyrning Kvartsplan",
+            "unit_of_measurement": "SEK/kWh",
+            "plan": {},
+        }
+
+    cols = {
+        "time": [],
+        "price_in": [],
+        "price_out": [],
+        "house": [],
+        "pv": [],
+        "grid_in": [],
+        "batt_charge": [],
+        "batt_discharge": [],
+        "grid_out": [],
+        "soc": [],
+        "threshold": [],
+    }
+    for p in plan:
+        cols["time"].append(p["time"][11:16])
+        cols["price_in"].append(round(float(p["price_in"]), 3))
+        cols["price_out"].append(round(float(p["price_out"]), 3))
+        cols["house"].append(round(float(p["load_kw"]), 2))
+        cols["pv"].append(round(float(p["pv_kw"]), 2))
+        cols["grid_in"].append(round(float(p["grid_import_kw"]), 2))
+        # charge_kw är enbart NÄTLADDNING (se plan_compat i main()). PV-laddning
+        # av batteriet publiceras inte alls i planen — känd lucka, parkerad
+        # 2026-11-26. Fältet heter därför batt_charge och inte charge.
+        cols["batt_charge"].append(round(float(p["grid_charge_kw"]), 2))
+        cols["batt_discharge"].append(round(float(p["discharge_kw"]), 2))
+        cols["grid_out"].append(round(float(p["grid_export_kw"]), 2))
+        cols["soc"].append(round(float(p["soc_pct"]), 1))
+        thr = p.get("tariff_threshold_kw")
+        cols["threshold"].append(round(float(thr), 2) if thr is not None else None)
+
+    attrs = {
+        "friendly_name": "Batteristyrning Kvartsplan",
+        "unit_of_measurement": "SEK/kWh",
+        # Toppnivå-fält: allt som inte är en serie över tid. Roger 2026-11-26:
+        # "det kan komma andra attribut på toppnivå, tex ingående SOC, P1,P2,P3
+        # och vad som krävs för att återskapa diagrammen i HA."
+        "start": plan[0]["time"],
+        "quarters": len(cols["time"]),
+        "step_minutes": 15,
+        "generated": datetime.datetime.now(
+            zoneinfo.ZoneInfo("Europe/Stockholm")).isoformat(timespec="seconds"),
+        "soc_now": round(float(soc_now_pct), 1) if soc_now_pct is not None else None,
+        "p_threshold": round(float(t_threshold), 2) if t_threshold is not None else None,
+        "soc_kwh_nominal": NOMINAL_CAPACITY_KWH,
+        # Enheter för serierna, så att en HA-konsument slipper gissa.
+        "units": {
+            "price_in": "SEK/kWh", "price_out": "SEK/kWh",
+            "house": "kW", "pv": "kW", "grid_in": "kW",
+            "batt_charge": "kW", "batt_discharge": "kW", "grid_out": "kW",
+            "soc": "%", "threshold": "kW",
+        },
+    }
+    if peak_info:
+        attrs["p1_kw"] = round(float(peak_info.get("p1", 0.0)), 2)
+        attrs["p2_kw"] = round(float(peak_info.get("p2", 0.0)), 2)
+        attrs["p3_kw"] = round(float(peak_info.get("p3", 0.0)), 2)
+        attrs["p_max_today_kw"] = round(float(peak_info.get("p_max_today", 0.0)), 2)
+    if extra:
+        attrs.update(extra)
+    attrs["plan"] = cols
+
+    return round(float(cols["price_in"][0]), 3), attrs
+
+
 def main():
     """Huvudfunktion för körning av v2 LP-optimering och publicering till Home Assistant.
 
@@ -748,6 +849,26 @@ def main():
             "plan_48h": plan_compat
         }
     )
+
+    # Kvartsplan — den läsbara tabellen, kolumnvis (se build_quarter_plan_attributes).
+    # Egen sensor därför att plan_48h redan ligger på ~23 kB, vilket är över
+    # recorder-gränsen: den syns live men sparas aldrig i historiken. Den här
+    # sensorn håller sig under 16 kB och blir därmed läsbar bakåt i tiden.
+    try:
+        qp_state, qp_attrs = build_quarter_plan_attributes(
+            plan_compat,
+            peak_info={"p1": p1_peak, "p2": p2_peak, "p3": p3_hist,
+                       "p_max_today": p_max_today},
+            soc_now_pct=soc_pct,
+            t_threshold=q0.get("tariff_threshold_kw"),
+        )
+        client.post_state("sensor.batterycontrol_quarter_plan", qp_state, qp_attrs)
+        print(f"Kvartsplan publicerad: {len(plan_compat)} kvartar, "
+              f"state={qp_state} SEK/kWh")
+    except Exception as exc:
+        # En trasig kvartsplan far aldrig stoppa styrningen - planen ovan ar
+        # redan publicerad och det ar den som run_loop styr pa.
+        print(f"Varning: kunde inte publicera kvartsplan: {exc}")
 
     client.close()
     print("Plan publicerad till sensor.batterycontrol_plan_now i Home Assistant.")
